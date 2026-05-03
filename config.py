@@ -9,6 +9,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _lookup_str(name: str, default: str | None = None) -> str | None:
+    """Resolve a setting from process env, then Streamlit Cloud secrets (not in os.environ)."""
+    raw = os.getenv(name)
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip()
+    try:
+        import streamlit as st
+
+        sec = getattr(st, "secrets", None)
+        if sec is not None and name in sec:
+            val = sec[name]
+            if val is not None and str(val).strip() != "":
+                return str(val).strip()
+    except Exception:
+        pass
+    return default
+
+
 BRAND = "HireQuity"
 PRODUCT = "Intent Outbound Engine"
 
@@ -85,14 +104,19 @@ class NocoDBSettings:
 
 
 def _read_env(name: str, default: str | None = None) -> str:
-    value = os.getenv(name, default)
-    if value is None:
-        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = _lookup_str(name, default)
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        if default is not None:
+            return str(default).strip()
+        raise RuntimeError(
+            f"Missing required setting: {name}. "
+            "Set it in the environment or in Streamlit Cloud app Secrets (same key name)."
+        )
     return value.strip()
 
 
 def _read_optional_env(name: str, default: str = "") -> str:
-    value = os.getenv(name, default)
+    value = _lookup_str(name, default or None)
     return (value or "").strip()
 
 
