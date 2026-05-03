@@ -9,7 +9,8 @@ from config import BRAND, MAX_EMAILS_PER_INBOX_PER_DAY, REPLY_INTERESTED, REPLY_
 from crm import build_crm_record, to_crm_dataframe
 from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
-from email_engine import build_email_sequence, role_based_suggestions
+from email_engine import build_email_sequence
+from role_suggestions import role_based_suggestions
 from enrichment import waterfall_enrichment
 from internal_intent import invalidate_intent_corpus_cache
 from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
