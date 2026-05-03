@@ -26,11 +26,24 @@ Open your terminal (or Command Prompt) and navigate to this folder. Run this com
 pip install -r requirements.txt
 ```
 
+Create your environment file and fill real provider credentials:
+```bash
+cp .env.example .env
+```
+
 ### 3. Launch the App
 Run this command to open the IntentFlow dashboard in your web browser:
 ```bash
 streamlit run main.py
 ```
+
+Required providers in this build:
+- OpenRouter (email generation + reply classification)
+- Apify (jobs + social datasets)
+- Apollo + Hunter (contact enrichment waterfall)
+- AWS SES (email send)
+- HubSpot (CRM sync)
+- IMAP inbox (reply ingestion)
 
 ---
 

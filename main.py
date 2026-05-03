@@ -1,33 +1,38 @@
-import streamlit as st
-import pandas as pd
+import json
 import time
-import hashlib
 from html import escape
 
-from config import BRAND, REPLY_UNSUBSCRIBE, REPLY_NOT_INTERESTED, REPLY_INTERESTED, MAX_EMAILS_PER_INBOX_PER_DAY
-from pipeline import run_intent_stage, filter_outreach_ready
-from enrichment import waterfall_enrichment
-from email_engine import build_email_sequence
-from deliverability import InboxStatus, plan_capacity
-from walego import handoff_to_walego, mock_walego_engagement
-from reply_classification import classify_reply_text, crm_eligible
+import pandas as pd
+import streamlit as st
+
+from config import BRAND, MAX_EMAILS_PER_INBOX_PER_DAY, REPLY_INTERESTED, REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE
 from crm import build_crm_record, to_crm_dataframe
 from dashboard_metrics import build_dashboard
+from deliverability import InboxStatus, plan_capacity
+from email_engine import build_email_sequence, role_based_suggestions
+from enrichment import waterfall_enrichment
+from internal_intent import invalidate_intent_corpus_cache
+from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
+from outreach import dispatch_email_internal
+from pipeline import filter_outreach_ready, run_intent_stage
+from reply_classification import classify_reply_text, crm_eligible
 from ui_theme import (
     get_global_css,
+    glass_card_end,
+    glass_card_start,
     render_hero,
+    render_stat_grid,
     render_stepper,
     section_header,
-    glass_card_start,
-    glass_card_end,
-    render_stat_grid,
-    pill_for_reply,
 )
+from walego import handoff_to_walego
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title=f"{BRAND} – Command Center", page_icon="✦", layout="wide")
 
 # Session defaults
+if "session_id" not in st.session_state:
+    st.session_state.session_id = "default"
 if "step" not in st.session_state:
     st.session_state.step = 0
 if "company_jobs" not in st.session_state:
@@ -54,19 +59,129 @@ if "outreach_simulated" not in st.session_state:
     st.session_state.outreach_simulated = False
 if "replies_built" not in st.session_state:
     st.session_state.replies_built = False
+if "role_suggestions" not in st.session_state:
+    st.session_state.role_suggestions = None
+if "nocodb_hydrated" not in st.session_state:
+    st.session_state.nocodb_hydrated = False
+if "session_id_in" not in st.session_state:
+    st.session_state.session_id_in = st.session_state.session_id
 
 
 def prev_step():
     st.session_state.step = max(0, st.session_state.step - 1)
 
 
+def _serialize_blacklist() -> list[str]:
+    return sorted({str(x) for x in st.session_state.blacklist})
+
+
+def _deserialize_blacklist(items: list[str]) -> None:
+    st.session_state.blacklist = set(items or [])
+
+
+def _payload_for_save() -> dict:
+    return {
+        "company_jobs": st.session_state.company_jobs.to_dict(orient="records")
+        if isinstance(st.session_state.company_jobs, pd.DataFrame)
+        else None,
+        "company_scored": st.session_state.company_scored.to_dict(orient="records")
+        if isinstance(st.session_state.company_scored, pd.DataFrame)
+        else None,
+        "leads_enriched": st.session_state.leads_enriched.to_dict(orient="records")
+        if isinstance(st.session_state.leads_enriched, pd.DataFrame)
+        else None,
+        "emails_sent_count": int(st.session_state.emails_sent_count),
+        "walego_actions": int(st.session_state.walego_actions),
+        "walego_accepted": int(st.session_state.walego_accepted),
+        "walego_requests": int(st.session_state.walego_requests),
+        "replies": list(st.session_state.replies or []),
+        "blacklist": _serialize_blacklist(),
+        "crm_records": list(st.session_state.crm_records or []),
+        "outreach_simulated": bool(st.session_state.outreach_simulated),
+        "replies_built": bool(st.session_state.replies_built),
+        "role_suggestions": st.session_state.role_suggestions.to_dict(orient="records")
+        if isinstance(st.session_state.role_suggestions, pd.DataFrame)
+        else None,
+        "_ready_for_enrich": st.session_state.get("_ready_for_enrich", pd.DataFrame()).to_dict(orient="records")
+        if isinstance(st.session_state.get("_ready_for_enrich"), pd.DataFrame)
+        else None,
+    }
+
+
+def _hydrate_from_payload(payload: dict) -> None:
+    def _df(key: str) -> pd.DataFrame | None:
+        raw = payload.get(key)
+        if raw is None:
+            return None
+        return pd.DataFrame(raw)
+
+    st.session_state.company_jobs = _df("company_jobs")
+    st.session_state.company_scored = _df("company_scored")
+    st.session_state.leads_enriched = _df("leads_enriched")
+    st.session_state.emails_sent_count = int(payload.get("emails_sent_count") or 0)
+    st.session_state.walego_actions = int(payload.get("walego_actions") or 0)
+    st.session_state.walego_accepted = int(payload.get("walego_accepted") or 0)
+    st.session_state.walego_requests = int(payload.get("walego_requests") or 0)
+    st.session_state.replies = list(payload.get("replies") or [])
+    _deserialize_blacklist(list(payload.get("blacklist") or []))
+    st.session_state.crm_records = list(payload.get("crm_records") or [])
+    st.session_state.outreach_simulated = bool(payload.get("outreach_simulated"))
+    st.session_state.replies_built = bool(payload.get("replies_built"))
+    rs = payload.get("role_suggestions")
+    st.session_state.role_suggestions = pd.DataFrame(rs) if rs else None
+    rfe = payload.get("_ready_for_enrich")
+    st.session_state._ready_for_enrich = pd.DataFrame(rfe) if rfe else pd.DataFrame()
+
+
+def _save_to_nocodb() -> None:
+    payload = _payload_for_save()
+    upsert_snapshot(st.session_state.session_id, int(st.session_state.step), payload)
+    append_event("pipeline_save", {"session_id": st.session_state.session_id, "step": st.session_state.step})
+
+
+def _hydrate_from_nocodb() -> None:
+    if st.session_state.nocodb_hydrated:
+        return
+    try:
+        rid, row = find_snapshot_by_session(st.session_state.session_id)
+    except NocoDBError:
+        st.session_state.nocodb_hydrated = True
+        return
+    if not rid or not row:
+        st.session_state.nocodb_hydrated = True
+        return
+    raw = row.get("payload_json") or row.get("Payload_json") or row.get("payload")
+    if not raw:
+        st.session_state.nocodb_hydrated = True
+        return
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        st.session_state.nocodb_hydrated = True
+        return
+    step_val = row.get("step") or row.get("Step")
+    if step_val is not None:
+        try:
+            st.session_state.step = int(step_val)
+        except (TypeError, ValueError):
+            pass
+    _hydrate_from_payload(payload if isinstance(payload, dict) else {})
+    st.session_state.nocodb_hydrated = True
+
+
 def _ensure_intent():
     if st.session_state.company_scored is None:
-        jobs, scored = run_intent_stage()
-        st.session_state.company_jobs = jobs
-        st.session_state.company_scored = scored
+        try:
+            jobs, scored = run_intent_stage()
+            st.session_state.company_jobs = jobs
+            st.session_state.company_scored = scored
+        except Exception as exc:
+            st.error(f"Intent stage failed. Check OpenRouter credentials. Details: {exc}")
+            st.session_state.company_jobs = pd.DataFrame()
+            st.session_state.company_scored = pd.DataFrame()
 
 
+_hydrate_from_nocodb()
 st.markdown(get_global_css(), unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -76,13 +191,39 @@ with st.sidebar:
         <div style="padding:0.1rem 0 0.9rem;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:1rem;">
         <span style="font-size:0.62rem;letter-spacing:0.22em;text-transform:uppercase;color:#a78bfa;">Session</span><br/>
         <span style="font-size:1.15rem;font-weight:700;background:linear-gradient(90deg,#fff,#c4b5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">HireQuity</span>
-        <p style="margin:0.35rem 0 0;font-size:0.78rem;color:#71717a !important;">Intent Outbound · V1</p>
+        <p style="margin:0.35rem 0 0;font-size:0.78rem;color:#71717a !important;">In-house · OpenRouter + NocoDB</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    st.text_input("Session id", value=st.session_state.session_id, key="session_id_in")
+
+    def _apply_session():
+        st.session_state.session_id = (st.session_state.session_id_in or "default").strip()
+        st.session_state.nocodb_hydrated = False
+        st.session_state.company_jobs = None
+        st.session_state.company_scored = None
+        st.session_state.leads_enriched = None
+        st.session_state.replies = []
+        st.session_state.blacklist = set()
+        st.session_state.crm_records = []
+        st.session_state.role_suggestions = None
+        st.session_state.replies_built = False
+        st.session_state.outreach_simulated = False
+        st.session_state.step = 0
+
+    st.button("Apply session + reload from NocoDB", on_click=_apply_session, use_container_width=True)
+
     st.text_input("Destination email (optional)", placeholder="you@company.com", key="test_email_in")
     min_tier = st.multiselect("Outreach tiers", ["High", "Medium"], default=["High", "Medium"])
+
+    if st.button("Save pipeline to NocoDB", use_container_width=True):
+        try:
+            _save_to_nocodb()
+            st.success("Saved snapshot to NocoDB.")
+        except NocoDBError as exc:
+            st.error(str(exc))
+
     if st.button("Reset pipeline", use_container_width=True):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
@@ -90,6 +231,9 @@ with st.sidebar:
         st.session_state.blacklist = set()
         st.session_state.outreach_simulated = False
         st.session_state.replies_built = False
+        st.session_state.session_id = "default"
+        st.session_state.session_id_in = "default"
+        st.session_state.nocodb_hydrated = False
         st.rerun()
 
 _ensure_intent()
@@ -105,13 +249,18 @@ if st.session_state.step == 0:
     st.markdown(
         section_header(
             "Intent engine",
-            "Aggregate LinkedIn Jobs, Indeed, and Glassdoor with a sales-role lens, then layer social signals — volume is secondary to signal quality.",
+            "In-house corpus generation via OpenRouter (structured jobs + social signals), then scored like a real pipeline.",
         ),
         unsafe_allow_html=True,
     )
     d1, d2 = st.columns(2)
     with d1:
-        st.markdown(glass_card_start("Job postings") + "<p>Filtered: Sales Rep, AE, SDR, BDR, and related GTM roles.</p>" + glass_card_end(), unsafe_allow_html=True)
+        st.markdown(
+            glass_card_start("Job postings")
+            + "<p>Filtered: Sales Rep, AE, SDR, BDR, and related GTM roles.</p>"
+            + glass_card_end(),
+            unsafe_allow_html=True,
+        )
         st.dataframe(jobs if jobs is not None and not jobs.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
     with d2:
         st.markdown(
@@ -128,6 +277,12 @@ if st.session_state.step == 0:
         if st.button("Continue to scoring →", type="primary", use_container_width=True):
             st.session_state.step = 1
             st.rerun()
+    if st.button("Regenerate intent corpus (OpenRouter)", use_container_width=True):
+        invalidate_intent_corpus_cache()
+        st.session_state.company_jobs = None
+        st.session_state.company_scored = None
+        _ensure_intent()
+        st.rerun()
 
 # --- STEP 1: SCORING ---
 elif st.session_state.step == 1:
@@ -165,16 +320,15 @@ elif st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.markdown(
         section_header(
-            "Waterfall enrichment",
-            "Decision-makers (VP Sales, Head of Sales, Founder, People) — verified contact before a single send.",
+            "Enrichment",
+            "OpenRouter generates structured decision-maker profiles for drafting. Treat emails as fictional until you connect real verification.",
         ),
         unsafe_allow_html=True,
     )
     ready = st.session_state.get("_ready_for_enrich", pd.DataFrame())
     st.markdown("<div class='hq-glass'>", unsafe_allow_html=True)
     if st.session_state.leads_enriched is None:
-        st.info("Waterfall resolves name, title, email, phone, and LinkedIn — simulated in this build.")
-        if st.button("Execute waterfall", type="primary", use_container_width=True):
+        if st.button("Execute enrichment", type="primary", use_container_width=True):
             bar = st.progress(0)
             for i in range(100):
                 time.sleep(0.006)
@@ -182,11 +336,19 @@ elif st.session_state.step == 2:
             if ready is None or ready.empty:
                 st.error("No qualified companies. Return to scoring.")
             else:
-                st.session_state.leads_enriched = waterfall_enrichment(ready)
+                try:
+                    st.session_state.leads_enriched = waterfall_enrichment(ready)
+                except Exception as exc:
+                    st.error(f"Enrichment failed. Details: {exc}")
             st.rerun()
     else:
-        st.success("Verification complete — contacts are ready for dual-channel outreach.")
+        st.success("Contacts generated — ready for sequence drafting.")
         st.dataframe(st.session_state.leads_enriched, use_container_width=True, hide_index=True)
+        if st.button("Generate smart role-based email suggestions", use_container_width=True):
+            st.session_state.role_suggestions = role_based_suggestions(st.session_state.leads_enriched)
+        if st.session_state.role_suggestions is not None:
+            st.markdown("**Smart personalization suggestions (by enriched role)**")
+            st.dataframe(st.session_state.role_suggestions, use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
@@ -200,8 +362,8 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.markdown(
         section_header(
-            "Dual-channel outreach",
-            "Email is primary. Walego executes LinkedIn — we never duplicate messaging in-app.",
+            "Outreach",
+            "Sequences are generated with OpenRouter. Dispatch logs to NocoDB (no third-party email send in this build).",
         ),
         unsafe_allow_html=True,
     )
@@ -212,27 +374,32 @@ elif st.session_state.step == 3:
     else:
         ib = InboxStatus(inbox_id="inbox-1", sent_today=st.session_state.emails_sent_count)
         st.markdown(
-            f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day · SPF / DKIM / warm-up required in production.</div>",
+            f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability planning: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day.</div>",
             unsafe_allow_html=True,
         )
-        if st.button("Simulate email + Walego send", type="primary", use_container_width=True) or st.session_state.outreach_simulated:
+        if st.button("Log outreach dispatch to NocoDB", type="primary", use_container_width=True) or st.session_state.outreach_simulated:
             st.session_state.outreach_simulated = True
             if st.session_state.emails_sent_count == 0 and st.session_state.walego_actions == 0:
-                w_act = 0
+                sent_count = 0
                 w_req = 0
-                w_acc = 0
                 for _, lead in le.iterrows():
                     if str(lead.get("Email", "")) in st.session_state.blacklist:
                         continue
-                    eng = mock_walego_engagement(lead)
+                    seq = build_email_sequence(lead)
+                    lead_sent = 0
+                    for em in seq:
+                        ok, msg = dispatch_email_internal(str(lead.get("Email", "")), em["subject"], em["body"])
+                        if ok:
+                            lead_sent += 1
+                        else:
+                            st.warning(f"Dispatch log failed for {lead.get('Email')}: {msg}")
+                            break
+                    sent_count += lead_sent
                     w_req += 1
-                    w_act += 1 + eng["messages_in_sequence"]
-                    if eng["accepted"]:
-                        w_acc += 1
-                st.session_state.walego_actions = w_act
+                st.session_state.walego_actions = w_req
                 st.session_state.walego_requests = w_req
-                st.session_state.walego_accepted = w_acc
-                st.session_state.emails_sent_count = len(le) * 3
+                st.session_state.walego_accepted = 0
+                st.session_state.emails_sent_count = sent_count
         for _, lead in le.iterrows():
             if str(lead.get("Email", "")) in st.session_state.blacklist:
                 continue
@@ -240,18 +407,17 @@ elif st.session_state.step == 3:
             c = escape(str(lead.get("Company", "")))
             seq = build_email_sequence(lead)
             blocks = [
-                f'<div class="hq-lead">',
-                f'<h4>{n}</h4><div class="meta">{c} · Email-first sequence (max 3) + Walego handoff</div>',
+                '<div class="hq-lead">',
+                f"<h4>{n}</h4><div class=\"meta\">{c} · Email-first sequence (max 3) + Walego handoff</div>",
             ]
             for em in seq:
                 blocks.append(
                     f'<div class="email-draft-box"><b>Touch {em["step"]}</b> · {escape(em["subject"])}<br><br>{escape(em["body"])}</div>'
                 )
-            blocks.append(f'<p class="meta">Walego JSON payload (execution layer)</p><pre style="font-size:0.75rem;opacity:0.9;">{escape(handoff_to_walego(lead))}</pre>')
-            eng = mock_walego_engagement(lead)
             blocks.append(
-                f'<p class="meta">Walego: connection sent · accepted={eng["accepted"]} · sequence depth={eng["messages_in_sequence"]}</p></div>'
+                f'<p class="meta">Walego JSON payload (execution layer)</p><pre style="font-size:0.75rem;opacity:0.9;">{escape(handoff_to_walego(lead))}</pre>'
             )
+            blocks.append("<p class=\"meta\">Walego handoff generated (in-house payload).</p></div>")
             st.markdown("".join(blocks), unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1:
@@ -267,55 +433,52 @@ elif st.session_state.step == 4:
     st.markdown(
         section_header(
             "Reply intelligence",
-            "Interested, not interested, or unsubscribe — only Interested flows to your CRM; others stop and blacklist where appropriate.",
+            "Paste sample replies for each lead email (in-house). OpenRouter classifies; only Interested flows to CRM records.",
         ),
         unsafe_allow_html=True,
     )
     le = st.session_state.leads_enriched
-    if not st.session_state.replies_built:
-        st.session_state.replies = []
+    if le is None or le.empty:
+        st.warning("No enriched leads to attach replies to.")
+    else:
+        st.text_area(
+            "Paste replies as JSON list: [{\"email\":\"...\",\"text\":\"...\"}, ...]",
+            height=160,
+            key="replies_json_in",
+        )
+        if st.button("Parse + classify replies", use_container_width=True):
+            st.session_state.replies = []
+            raw = (st.session_state.get("replies_json_in") or "").strip()
+            try:
+                items = json.loads(raw) if raw else []
+            except json.JSONDecodeError as exc:
+                st.error(f"Invalid JSON: {exc}")
+                items = []
+            if not isinstance(items, list):
+                st.error("Replies JSON must be a list.")
+            else:
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    em = str(it.get("email") or "").strip()
+                    txt = str(it.get("text") or "").strip()
+                    if not em or not txt:
+                        continue
+                    lab = classify_reply_text(txt)
+                    st.session_state.replies.append(
+                        {
+                            "name": em,
+                            "text": txt,
+                            "label": lab,
+                            "email": em,
+                            "crm": crm_eligible(lab),
+                        }
+                    )
+                    if lab in (REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE):
+                        st.session_state.blacklist.add(em)
+                st.session_state.replies_built = True
+                st.rerun()
 
-        def _h(s: str) -> int:
-            return int(hashlib.md5(s.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
-
-        sample = [
-            "Yes, let's do Tuesday at 2pm for a quick call.",
-            "Not a fit for us right now, thanks.",
-            "Please remove me from your list.",
-        ]
-        for i, s in enumerate(sample):
-            label = classify_reply_text(s)
-            st.session_state.replies.append(
-                {"name": f"Sample {i+1}", "text": s, "label": label, "crm": crm_eligible(label)}
-            )
-        st.markdown("**Exemplar classifications**", unsafe_allow_html=True)
-        for i, s in enumerate(sample):
-            label = classify_reply_text(s)
-            st.markdown(
-                f'<div class="hq-glass" style="margin:0.35rem 0;">{pill_for_reply(label)} <span class="hq-fade" style="margin-left:0.3rem;">{escape(s[:120])}…</span></div>',
-                unsafe_allow_html=True,
-            )
-        if le is not None and not le.empty:
-            for _, lead in le.iterrows():
-                em = str(lead.get("Email") or "")
-                t = (
-                    f"Interested in learning more at {lead.get('Company')}"
-                    if (_h(em) % 2) == 0
-                    else "No thanks, not the right time."
-                )
-                lab = classify_reply_text(t)
-                st.session_state.replies.append(
-                    {
-                        "name": lead.get("Name"),
-                        "text": t,
-                        "label": lab,
-                        "email": em,
-                        "crm": crm_eligible(lab),
-                    }
-                )
-                if lab in (REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE) and em:
-                    st.session_state.blacklist.add(em)
-        st.session_state.replies_built = True
     if st.session_state.replies:
         st.markdown("**Inbox (structured)**", unsafe_allow_html=True)
         rdf = pd.DataFrame(st.session_state.replies)
@@ -325,7 +488,7 @@ elif st.session_state.step == 4:
     with c1:
         st.button("← Back", on_click=prev_step, use_container_width=True)
     with c2:
-        if st.button("Sync CRM (qualified) →", type="primary", use_container_width=True):
+        if st.button("Build CRM records →", type="primary", use_container_width=True):
             st.session_state.step = 5
             st.rerun()
 
@@ -333,8 +496,8 @@ elif st.session_state.step == 4:
 elif st.session_state.step == 5:
     st.markdown(
         section_header(
-            "CRM (downstream)",
-            "Qualified only — with intent reason, full contact graph, and interaction history so a rep can act with zero cleanup.",
+            "CRM (in-house)",
+            "Qualified only — records are materialized here and can be persisted via NocoDB snapshots/events.",
         ),
         unsafe_allow_html=True,
     )
@@ -347,13 +510,18 @@ elif st.session_state.step == 5:
             by_email[str(e)] = r
     if le is not None and not le.empty:
         for _, lead in le.iterrows():
-            hist = "Email: 1–3 touches · Walego: connection + sequence (mock engagement feed)."
+            hist = "Outreach: sequences generated + dispatch logged to NocoDB (no external send)."
             em = str(lead.get("Email") or "")
             rpl = by_email.get(em) if em else None
             lab = rpl.get("label") if rpl else REPLY_NOT_INTERESTED
             if crm_eligible(lab):
                 recs.append(build_crm_record(lead, interaction_log=hist, status="Interested"))
     st.session_state.crm_records = recs
+    if recs:
+        try:
+            append_event("crm_records", {"records": recs})
+        except NocoDBError as exc:
+            st.warning(f"Could not log CRM batch to NocoDB events table: {exc}")
     st.dataframe(to_crm_dataframe(recs), use_container_width=True, hide_index=True)
     c1, c2 = st.columns(2)
     with c1:
@@ -368,7 +536,7 @@ else:
     st.markdown(
         section_header(
             "Live performance",
-            "What your client sees: funnel lift, quality split, channel engagement, conversion, and pipeline health.",
+            "Operational view of the in-house pipeline (generation + logging).",
         ),
         unsafe_allow_html=True,
     )
@@ -405,8 +573,8 @@ else:
                     "Top of funnel",
                     [
                         (str(t["leads_generated"]), "Leads generated"),
-                        (str(t["emails_sent"]), "Emails sent (sim)"),
-                        (str(t["linkedin_actions"]), "LinkedIn actions"),
+                        (str(t["emails_sent"]), "Dispatch logs"),
+                        (str(t["linkedin_actions"]), "Walego handoffs"),
                     ],
                 ),
                 (

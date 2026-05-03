@@ -7,9 +7,22 @@ from __future__ import annotations
 import re
 
 from config import REPLY_INTERESTED, REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE
+from openrouter_client import OpenRouterError, classify_reply_with_openrouter
 
 
 def classify_reply_text(text: str) -> str:
+    try:
+        label = classify_reply_with_openrouter(text)
+        if label == "Interested":
+            return REPLY_INTERESTED
+        if label == "Not interested":
+            return REPLY_NOT_INTERESTED
+        if label == "Unsubscribe":
+            return REPLY_UNSUBSCRIBE
+    except OpenRouterError:
+        # Fallback keeps pipeline working during transient provider issues.
+        pass
+
     t = (text or "").strip().lower()
     if not t:
         return REPLY_NOT_INTERESTED

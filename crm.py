@@ -7,7 +7,6 @@ from datetime import datetime
 import hashlib
 import pandas as pd
 
-
 def _id_for(lead: pd.Series) -> str:
     raw = f"{lead.get('Email', '')}{lead.get('Name', '')}{lead.get('Company', '')}"
     return hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]

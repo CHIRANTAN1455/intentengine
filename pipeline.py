@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from intent_engine import add_job_signals, aggregate_by_company, fetch_job_postings
+from intent_engine import add_job_signals, aggregate_by_company
+from internal_intent import fetch_job_postings, fetch_social_intent
 from scoring import filter_tiers, score_companies
-from social_intent import fetch_social_intent
 
 
 def _intent_reason_row(r: pd.Series) -> str:
