@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
 .env
+config.toml
+streamlit.cloud.secrets.toml
 .venv/
