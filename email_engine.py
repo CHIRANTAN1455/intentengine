@@ -3,6 +3,8 @@ Email engine (primary): max 2–3 touches; HireQuity rep tone; hiring + company 
 """
 from __future__ import annotations
 
+from typing import Dict, List, Optional, Union
+
 import pandas as pd
 
 from config import HIREQUITY_TONE, MAX_EMAILS_PER_LEAD
@@ -71,7 +73,7 @@ def role_based_suggestions(leads: pd.DataFrame) -> pd.DataFrame:
         role_col = None
     if not role_col:
         return pd.DataFrame(columns=["Role", "Count", "Angle", "Value proposition", "CTA", "Subject hook"])
-    rows: list[dict[str, str | int]] = []
+    rows: List[Dict[str, Union[str, int]]] = []
     grouped = leads[role_col].fillna("Unknown role").astype(str).value_counts()
     for role, count in grouped.items():
         ctx = {"role": role, "lead_count": str(count), "campaign_tone": HIREQUITY_TONE}
@@ -92,7 +94,7 @@ def role_based_suggestions(leads: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_email_sequence(lead: pd.Series, max_emails: int | None = None) -> list[dict[str, str]]:
+def build_email_sequence(lead: pd.Series, max_emails: Optional[int] = None) -> List[Dict[str, str]]:
     """Return list of {step, subject, body} in HireQuity voice."""
     n = max_emails or MAX_EMAILS_PER_LEAD
     n = min(max(1, n), MAX_EMAILS_PER_LEAD)
