@@ -282,7 +282,11 @@ def _ensure_intent():
             stream_info_slot.empty()
             stream_table_slot.empty()
         except Exception as exc:
-            st.error(f"Intent stage failed. Check OpenRouter credentials. Details: {exc}")
+            st.error(
+                "Intent stage failed. Check LLM / OpenRouter API keys and `LLM_PROVIDER_ORDER` in `.env` or "
+                "Streamlit secrets. For live Indeed/LinkedIn rows, install **`python-jobspy`** (not the PyPI "
+                f"package named `jobspy`). Details: {exc}"
+            )
             st.session_state.company_jobs = pd.DataFrame()
             st.session_state.company_scored = pd.DataFrame()
 
@@ -396,6 +400,13 @@ if st.session_state.step == 0:
         st.caption(
             f"Jobs fetched this run: {len(jobs) if isinstance(jobs, pd.DataFrame) else 0}"
         )
+        if isinstance(jobs, pd.DataFrame) and jobs.empty:
+            st.info(
+                "No rows yet — common causes: **(1)** Wrong dependency: the PyPI package `jobspy` is not the board "
+                "scraper; this app needs **`python-jobspy`** (Python **3.10+**). Reinstall from `requirements.txt`. "
+                "**(2)** Missing or invalid **LLM / OpenRouter** keys for the synthetic fallback. "
+                "**(3)** Try **Regenerate intent corpus** after fixing env."
+            )
     with d2:
         st.markdown(
             glass_card_start("Company intelligence")

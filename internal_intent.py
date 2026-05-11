@@ -259,7 +259,10 @@ def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
                 corpus = _merge_corpora(corpus, chunk)
                 if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
                     break
-    _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
+    job_n = len(list(corpus.get("jobs", []) or []))
+    # Do not cache empty failures for 15m — that made the UI stick on "0 jobs" after transient errors.
+    ttl = 15 * 60 if job_n > 0 else 45
+    _CORPUS_CACHE[key] = (now + ttl, corpus)
     return corpus
 
 
@@ -337,7 +340,9 @@ def fetch_job_postings_stream(
                 if len(partial_jobs) >= INTENT_CORPUS_MIN_JOBS:
                     break
 
-    _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
+    job_n = len(list(corpus.get("jobs", []) or []))
+    ttl = 15 * 60 if job_n > 0 else 45
+    _CORPUS_CACHE[key] = (now + ttl, corpus)
     jobs = _enforce_country_priority_mix(list(corpus.get("jobs", []) or []))
     return pd.DataFrame(_job_rows_from_raw_jobs(jobs))
 

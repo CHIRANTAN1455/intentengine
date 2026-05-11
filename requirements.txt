@@ -2,4 +2,5 @@ streamlit
 pandas
 python-dotenv
 requests
-jobspy
+# Job boards (LinkedIn, Indeed, …). Do NOT use the PyPI package named "jobspy" — it is unrelated.
+python-jobspy>=1.1.0

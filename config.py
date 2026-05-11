@@ -38,13 +38,28 @@ LIVE_JOB_SITES = ("indeed", "linkedin")
 # Sales hiring roles to match
 SALES_ROLE_KEYWORDS = (
     "sales rep",
+    "sales representative",
     "account executive",
+    "account exec",
     "sdr",
     "bdr",
     "ae",
-    "account exec",
     "business development",
+    "sales development",
     "outbound",
+    "inside sales",
+    "field sales",
+    "enterprise sales",
+    "commercial sales",
+    "sales manager",
+    "sales director",
+    "head of sales",
+    "vp sales",
+    "vp of sales",
+    "vice president of sales",
+    "revenue",
+    "gtm",
+    "go to market",
 )
 
 # Job postings: cap oldest listing to 3 weeks in pipeline/UI
