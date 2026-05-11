@@ -46,6 +46,12 @@ SALES_ROLE_KEYWORDS = (
     "outbound",
 )
 
+# Job postings: never older than this many days (~2 months) in pipeline or UI filter range
+MAX_JOB_POSTING_AGE_DAYS = 60
+
+# Synthetic corpus: target share of US + Canada listings (rest may be international)
+CORPUS_NA_JOB_SHARE = 0.95
+
 # Intent tiers
 TIER_HIGH = "High"
 TIER_MEDIUM = "Medium"

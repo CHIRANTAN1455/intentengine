@@ -5,7 +5,15 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
-from config import BRAND, MAX_EMAILS_PER_INBOX_PER_DAY, REPLY_INTERESTED, REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE
+from config import (
+    BRAND,
+    CORPUS_NA_JOB_SHARE,
+    MAX_EMAILS_PER_INBOX_PER_DAY,
+    MAX_JOB_POSTING_AGE_DAYS,
+    REPLY_INTERESTED,
+    REPLY_NOT_INTERESTED,
+    REPLY_UNSUBSCRIBE,
+)
 from crm import (
     apply_blacklist_to_records,
     apply_dispatch_to_records,
@@ -20,6 +28,7 @@ from email_engine import build_email_sequence
 from role_suggestions import role_based_suggestions
 from enrichment import waterfall_enrichment
 from internal_intent import invalidate_intent_corpus_cache
+from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
 from outreach import dispatch_email_internal
 from pipeline import filter_outreach_ready, run_intent_stage
@@ -75,6 +84,8 @@ if "session_id_in" not in st.session_state:
     st.session_state.session_id_in = st.session_state.session_id
 if "assigned_sdr_label" not in st.session_state:
     st.session_state.assigned_sdr_label = "SDR Team"
+if "max_job_age_days" not in st.session_state:
+    st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
 
 
 def prev_step():
@@ -115,6 +126,8 @@ def _payload_for_save() -> dict:
         "_ready_for_enrich": st.session_state.get("_ready_for_enrich", pd.DataFrame()).to_dict(orient="records")
         if isinstance(st.session_state.get("_ready_for_enrich"), pd.DataFrame)
         else None,
+        "max_job_age_days": int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)),
+        "viewer_geo_key": str(st.session_state.get("_intent_geo_key_applied") or corpus_geo_cache_key(st.session_state.get("_viewer_geo"))),
     }
 
 
@@ -141,6 +154,29 @@ def _hydrate_from_payload(payload: dict) -> None:
     st.session_state.role_suggestions = pd.DataFrame(rs) if rs else None
     rfe = payload.get("_ready_for_enrich")
     st.session_state._ready_for_enrich = pd.DataFrame(rfe) if rfe else pd.DataFrame()
+    ma = payload.get("max_job_age_days")
+    if ma is not None:
+        try:
+            st.session_state.max_job_age_days = max(1, min(int(ma), MAX_JOB_POSTING_AGE_DAYS))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(st.session_state.company_scored, pd.DataFrame):
+        st.session_state._intent_max_age_applied = int(
+            st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)
+        )
+    vgk = payload.get("viewer_geo_key")
+    if vgk is not None:
+        st.session_state._intent_geo_key_applied = str(vgk)
+
+
+def _viewer_geo_maybe_refresh() -> None:
+    """Throttle IP geolocation lookups (ip-api.com) to once per hour per session."""
+    now = time.time()
+    ttl = float(st.session_state.get("_viewer_geo_ttl") or 0)
+    if ttl > now and isinstance(st.session_state.get("_viewer_geo"), dict):
+        return
+    st.session_state._viewer_geo = build_geo_hint_for_corpus()
+    st.session_state._viewer_geo_ttl = now + 3600.0
 
 
 def _save_to_nocodb() -> None:
@@ -180,11 +216,32 @@ def _hydrate_from_nocodb() -> None:
 
 
 def _ensure_intent():
-    if st.session_state.company_scored is None:
+    max_age = int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS))
+    max_age = max(1, min(max_age, MAX_JOB_POSTING_AGE_DAYS))
+    cached = st.session_state.get("_intent_max_age_applied")
+    geo_hint = st.session_state.get("_viewer_geo")
+    if not isinstance(geo_hint, dict):
+        geo_hint = None
+    geo_key = corpus_geo_cache_key(geo_hint)
+    cached_geo = st.session_state.get("_intent_geo_key_applied")
+    if (
+        cached_geo is None
+        and isinstance(st.session_state.company_scored, pd.DataFrame)
+        and not st.session_state.company_scored.empty
+    ):
+        st.session_state._intent_geo_key_applied = geo_key
+        cached_geo = geo_key
+    if (
+        st.session_state.company_scored is None
+        or cached != max_age
+        or cached_geo != geo_key
+    ):
         try:
-            jobs, scored = run_intent_stage()
+            jobs, scored = run_intent_stage(max_job_age_days=max_age, geo_hint=geo_hint)
             st.session_state.company_jobs = jobs
             st.session_state.company_scored = scored
+            st.session_state._intent_max_age_applied = max_age
+            st.session_state._intent_geo_key_applied = geo_key
         except Exception as exc:
             st.error(f"Intent stage failed. Check OpenRouter credentials. Details: {exc}")
             st.session_state.company_jobs = pd.DataFrame()
@@ -206,6 +263,7 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
+    _viewer_geo_maybe_refresh()
     st.text_input("Session id", value=st.session_state.session_id, key="session_id_in")
     st.text_input(
         "Assigned SDR (CRM visibility)",
@@ -216,6 +274,7 @@ with st.sidebar:
     def _apply_session():
         st.session_state.session_id = (st.session_state.session_id_in or "default").strip()
         st.session_state.nocodb_hydrated = False
+        st.session_state.pop("_intent_geo_key_applied", None)
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
         st.session_state.leads_enriched = None
@@ -230,7 +289,20 @@ with st.sidebar:
     st.button("Apply session + reload from NocoDB", on_click=_apply_session, use_container_width=True)
 
     st.text_input("Destination email (optional)", placeholder="you@company.com", key="test_email_in")
+    st.slider(
+        "Max job posting age (days)",
+        min_value=1,
+        max_value=MAX_JOB_POSTING_AGE_DAYS,
+        key="max_job_age_days",
+        help=f"Listings older than this many days are dropped (hard cap {MAX_JOB_POSTING_AGE_DAYS} days ≈ 2 months).",
+    )
     min_tier = st.multiselect("Outreach tiers", ["High", "Medium"], default=["High", "Medium"])
+    vg = st.session_state.get("_viewer_geo")
+    if isinstance(vg, dict) and vg.get("summary"):
+        st.caption(vg["summary"])
+    st.caption(
+        f"Job corpus targets ~{int(round(CORPUS_NA_JOB_SHARE * 100))}% US + Canada, biased to your connection where possible."
+    )
 
     if st.button("Save pipeline to NocoDB", use_container_width=True):
         try:
@@ -249,6 +321,7 @@ with st.sidebar:
         st.session_state.session_id = "default"
         st.session_state.session_id_in = "default"
         st.session_state.nocodb_hydrated = False
+        st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
         st.rerun()
 
 _ensure_intent()
@@ -264,7 +337,9 @@ if st.session_state.step == 0:
     st.markdown(
         section_header(
             "Intent engine",
-            "In-house corpus generation via OpenRouter (structured jobs + social signals), then scored like a real pipeline.",
+            "In-house corpus generation via OpenRouter (structured jobs + social signals), then scored like a real pipeline. "
+            f"Job postings older than the sidebar “max age” (up to {MAX_JOB_POSTING_AGE_DAYS} days) are excluded. "
+            f"Listings target ~{int(round(CORPUS_NA_JOB_SHARE * 100))}% US + Canada, weighted toward your connection region when available.",
         ),
         unsafe_allow_html=True,
     )
@@ -272,7 +347,8 @@ if st.session_state.step == 0:
     with d1:
         st.markdown(
             glass_card_start("Job postings")
-            + "<p>Filtered: Sales Rep, AE, SDR, BDR, and related GTM roles.</p>"
+            + f"<p>Filtered: Sales Rep, AE, SDR, BDR, and related GTM roles. Posting age ≤ {int(st.session_state.get('max_job_age_days', MAX_JOB_POSTING_AGE_DAYS))} days (cap {MAX_JOB_POSTING_AGE_DAYS}d). "
+            + f"~{int(round(CORPUS_NA_JOB_SHARE * 100))}% US/CA by design.</p>"
             + glass_card_end(),
             unsafe_allow_html=True,
         )

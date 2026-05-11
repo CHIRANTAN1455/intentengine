@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date, timedelta
 from typing import Any
 
 import requests
 
-from config import get_openrouter_settings
+from config import CORPUS_NA_JOB_SHARE, MAX_JOB_POSTING_AGE_DAYS, get_openrouter_settings
 
 
 class OpenRouterError(RuntimeError):
@@ -166,7 +167,38 @@ def suggest_role_strategy_with_openrouter(role_context: dict[str, str]) -> dict[
     return out
 
 
-def generate_intent_corpus_with_openrouter() -> dict[str, Any]:
+def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
+    pct = int(round(100 * CORPUS_NA_JOB_SHARE))
+    g = geo_hint or {}
+    summary = str(g.get("summary") or "Viewer location unknown; use major US and Canadian tech hubs.")
+    in_na = bool(g.get("in_na"))
+    city = str(g.get("city") or "")
+    region = str(g.get("region") or "")
+    cc = str(g.get("countryCode") or "")
+    lines = [
+        "Geography:",
+        f"- About {pct}% of jobs must be for companies headquartered or hiring in the **United States** or **Canada** (realistic company names and metros).",
+        f"- At most about {100 - pct}% of jobs may be outside US/Canada (other regions).",
+        f"- Viewer context (IP-derived, approximate): {summary}",
+    ]
+    if in_na and (city or region):
+        lines.append(
+            f"- Within US/Canada, bias locations toward the viewer's area when plausible: {city}, {region}, {cc}."
+        )
+    elif not in_na and cc:
+        lines.append(
+            "- The viewer is outside US/Canada; still keep the US+Canada job share as above (North American GTM hiring demand)."
+        )
+    lines.append(
+        '- Every job must include "countryCode": "US" or "CA" (or occasionally another ISO-3166 alpha-2 for the small non-NA share).'
+    )
+    lines.append(
+        "- Social rows should reference the same companies / hiring motion; keep geography consistent with the jobs."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     Generate synthetic-but-structured hiring intent data for the in-house pipeline.
     Returns JSON object: { "jobs": [...], "social": [...] }.
@@ -180,6 +212,7 @@ def generate_intent_corpus_with_openrouter() -> dict[str, Any]:
         '      "title": "string (sales hiring role)",\n'
         '      "url": "https://example.com/job/1",\n'
         '      "postedAt": "YYYY-MM-DD",\n'
+        '      "countryCode": "US",\n'
         '      "source": "inhouse"\n'
         "    }\n"
         "  ],\n"
@@ -196,6 +229,9 @@ def generate_intent_corpus_with_openrouter() -> dict[str, Any]:
         "- Provide 6-10 social rows across overlapping companies.\n"
         "- Titles must include sales roles (SDR, BDR, AE, Account Executive, Sales Rep).\n"
         "- Keep URLs plausible but fictional.\n"
+        f"- Every postedAt must be on or after { (date.today() - timedelta(days=MAX_JOB_POSTING_AGE_DAYS)).isoformat() } "
+        f"(within the last {MAX_JOB_POSTING_AGE_DAYS} days); no stale listings.\n"
+        + _geo_block_for_corpus(geo_hint)
     )
     content = _chat_completion(
         [
