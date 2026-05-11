@@ -104,12 +104,15 @@ def seed_post_enrich_row(
     hist_parts = [log]
     if interaction_log:
         hist_parts.append(interaction_log)
+    li = str(lead.get("LinkedIn", "") or "").strip()
+    if not bool(lead.get("Enrichment verified")):
+        li = ""
     return {
         "id": _id_for(lead),
         "name": str(lead.get("Name", "")),
         "company": str(lead.get("Company", "")),
         "email": str(lead.get("Email", "")),
-        "linkedin": str(lead.get("LinkedIn", "")),
+        "linkedin": li,
         "phone": str(lead.get("Phone", "")),
         "intent_reason": str(lead.get("Intent reason", "")),
         "intent_score": score,

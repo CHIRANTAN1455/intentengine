@@ -19,7 +19,7 @@ def _fallback_contact(company: str) -> dict[str, str]:
         "last_name": last,
         "title": "Head of Sales",
         "email": f"{first.lower()}.{last.lower()}@{slug}.example.com",
-        "linkedin_url": f"https://linkedin.com/in/{first.lower()}-{last.lower()}-{slug}",
+        "linkedin_url": "",
         "phone": "",
     }
 
@@ -48,7 +48,7 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
             "Company": company,
             "Email": c.get("email", ""),
             "Phone": c.get("phone", ""),
-            "LinkedIn": c.get("linkedin_url", ""),
+            "LinkedIn": "",
             "Enrichment verified": False,
             "Intent reason": intent_reason or "Hiring for sales; intent signals from in-house corpus",
         }

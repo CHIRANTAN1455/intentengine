@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import json
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
 
@@ -20,6 +22,7 @@ from config import (
     REPLY_INTERESTED,
     REPLY_NOT_INTERESTED,
     REPLY_UNSUBSCRIBE,
+    auto_save_pipeline_to_nocodb,
 )
 from crm import (
     apply_blacklist_to_records,
@@ -34,11 +37,23 @@ from deliverability import InboxStatus, plan_capacity
 from email_engine import build_email_sequence
 from role_suggestions import role_based_suggestions
 from enrichment import waterfall_enrichment
-from internal_intent import invalidate_intent_corpus_cache
+from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache
 from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
 from outreach import dispatch_email_internal
 from pipeline import filter_outreach_ready, run_intent_stage
+from reply_classification import classify_reply_text, crm_eligible
+from ui_theme import (
+    get_global_css,
+    glass_card_end,
+    glass_card_start,
+    render_client_welcome,
+    render_hero,
+    render_stat_grid,
+    render_stepper,
+    section_header,
+)
+from walego import handoff_to_walego
 
 
 def _build_ready_for_enrich(
@@ -67,18 +82,7 @@ def _enrichment_queue_df() -> pd.DataFrame:
     if not isinstance(mt, list):
         mt = ["High", "Medium"]
     return _build_ready_for_enrich(st.session_state.get("company_scored"), mt)
-from reply_classification import classify_reply_text, crm_eligible
-from ui_theme import (
-    get_global_css,
-    glass_card_end,
-    glass_card_start,
-    render_client_welcome,
-    render_hero,
-    render_stat_grid,
-    render_stepper,
-    section_header,
-)
-from walego import handoff_to_walego
+
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title=f"{BRAND} – Command Center", page_icon="✦", layout="wide")
@@ -138,6 +142,14 @@ def prev_step():
         st.session_state.role_suggestions = None
 
 
+def _outreach_lead_strip_unverified_linkedin(lead: pd.Series) -> pd.Series:
+    """Do not show or hand off LinkedIn URLs from LLM drafts until ``Enrichment verified`` is true."""
+    out = lead.copy()
+    if not bool(out.get("Enrichment verified")):
+        out["LinkedIn"] = ""
+    return out
+
+
 def _serialize_blacklist() -> list[str]:
     return sorted({str(x) for x in st.session_state.blacklist})
 
@@ -147,13 +159,19 @@ def _deserialize_blacklist(items: list[str]) -> None:
 
 
 def _payload_for_save() -> dict:
+    social_df = st.session_state.get("_social_intent_snapshot")
     return {
+        "snapshot_version": 2,
+        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
         "company_jobs": st.session_state.company_jobs.to_dict(orient="records")
         if isinstance(st.session_state.company_jobs, pd.DataFrame)
         else None,
         "company_scored": st.session_state.company_scored.to_dict(orient="records")
         if isinstance(st.session_state.company_scored, pd.DataFrame)
         else None,
+        "social_intent": social_df.to_dict(orient="records")
+        if isinstance(social_df, pd.DataFrame) and not social_df.empty
+        else ([] if isinstance(social_df, pd.DataFrame) else None),
         "leads_enriched": st.session_state.leads_enriched.to_dict(orient="records")
         if isinstance(st.session_state.leads_enriched, pd.DataFrame)
         else None,
@@ -174,6 +192,9 @@ def _payload_for_save() -> dict:
         else None,
         "max_job_age_days": int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)),
         "viewer_geo_key": str(st.session_state.get("_intent_geo_key_applied") or corpus_geo_cache_key(st.session_state.get("_viewer_geo"))),
+        "viewer_geo": _json_friendly_geo(st.session_state.get("_viewer_geo")),
+        "outreach_tiers": list(st.session_state.get("outreach_tiers") or ["High", "Medium"]),
+        "assigned_sdr_label": str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip(),
     }
 
 
@@ -213,6 +234,19 @@ def _hydrate_from_payload(payload: dict) -> None:
     vgk = payload.get("viewer_geo_key")
     if vgk is not None:
         st.session_state._intent_geo_key_applied = str(vgk)
+    vg = payload.get("viewer_geo")
+    if isinstance(vg, dict) and vg:
+        st.session_state._viewer_geo = vg
+        st.session_state._viewer_geo_ttl = time.time() + 3600.0
+    si = payload.get("social_intent")
+    if si is not None:
+        st.session_state._social_intent_snapshot = pd.DataFrame(si) if si else pd.DataFrame()
+    ot = payload.get("outreach_tiers")
+    if isinstance(ot, list) and ot:
+        st.session_state.outreach_tiers = [str(x) for x in ot if str(x).strip()]
+    al = payload.get("assigned_sdr_label")
+    if isinstance(al, str) and al.strip():
+        st.session_state.assigned_sdr_label = al.strip()
 
 
 def _viewer_geo_maybe_refresh() -> None:
@@ -321,10 +355,43 @@ def _client_welcome_background_fragment() -> None:
         prog_slot.progress(0.05, text="Preparing background pull…")
 
 
+def _json_friendly_geo(geo: Any) -> dict[str, Any] | None:
+    """Strip viewer geo to JSON-serializable primitives for NocoDB payload."""
+    if not isinstance(geo, dict):
+        return None
+    out: dict[str, Any] = {}
+    for k, v in geo.items():
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            out[str(k)] = v
+        elif isinstance(v, (list, tuple)):
+            out[str(k)] = [
+                x if isinstance(x, (str, int, float, bool)) or x is None else str(x) for x in v
+            ]
+        else:
+            out[str(k)] = str(v)
+    return out
+
+
 def _save_to_nocodb() -> None:
     payload = _payload_for_save()
     upsert_snapshot(st.session_state.session_id, int(st.session_state.step), payload)
     append_event("pipeline_save", {"session_id": st.session_state.session_id, "step": st.session_state.step})
+
+
+def _maybe_auto_save_nocodb(reason: str) -> None:
+    if not auto_save_pipeline_to_nocodb():
+        return
+    try:
+        upsert_snapshot(st.session_state.session_id, int(st.session_state.step), _payload_for_save())
+        try:
+            append_event(
+                "pipeline_auto_save",
+                {"session_id": st.session_state.session_id, "step": st.session_state.step, "reason": reason},
+            )
+        except NocoDBError:
+            pass
+    except NocoDBError:
+        pass
 
 
 def _hydrate_from_nocodb() -> None:
@@ -366,6 +433,7 @@ def _ensure_intent():
     if not isinstance(geo_hint, dict):
         geo_hint = None
     geo_key = corpus_geo_cache_key(geo_hint)
+    intent_refreshed = False
     cached_geo = st.session_state.get("_intent_geo_key_applied")
     if (
         cached_geo is None
@@ -423,7 +491,12 @@ def _ensure_intent():
                 prog.progress(100, text="Complete")
                 # Avoid custom label on state="complete" — overlaps with Streamlit's completion chrome.
                 pipe.update(state="complete")
-                st.toast(f"Intent ready — {nj} job postings, {nc} companies scored.", icon="✓")
+                st.toast(f"Intent ready — {nj} job postings, {nc} companies scored.", icon="✅")
+                intent_refreshed = True
+                try:
+                    st.session_state._social_intent_snapshot = fetch_social_intent(geo_hint=geo_hint)
+                except Exception:
+                    st.session_state._social_intent_snapshot = pd.DataFrame()
         except Exception as exc:
             if pipe_ref is not None:
                 pipe_ref.update(
@@ -441,6 +514,18 @@ def _ensure_intent():
             prog.empty()
             stream_info_slot.empty()
             stream_table_slot.empty()
+        if intent_refreshed:
+            _maybe_auto_save_nocodb("intent_refresh")
+
+    if not intent_refreshed:
+        sc2 = st.session_state.get("company_scored")
+        if isinstance(sc2, pd.DataFrame) and not sc2.empty:
+            si = st.session_state.get("_social_intent_snapshot")
+            if not isinstance(si, pd.DataFrame) or si.empty:
+                try:
+                    st.session_state._social_intent_snapshot = fetch_social_intent(geo_hint=geo_hint)
+                except Exception:
+                    st.session_state._social_intent_snapshot = pd.DataFrame()
 
 
 st.markdown(get_global_css(), unsafe_allow_html=True)
@@ -487,6 +572,7 @@ with st.sidebar:
         st.session_state.pop("_prefetch_ready_toast_shown", None)
         st.session_state.pop("_intent_prefetch_error", None)
         st.session_state.pop("_intent_geo_key_applied", None)
+        st.session_state.pop("_social_intent_snapshot", None)
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
         st.session_state.leads_enriched = None
@@ -626,6 +712,29 @@ if st.session_state.step == 0:
             unsafe_allow_html=True,
         )
         st.dataframe(scored if scored is not None and not scored.empty else pd.DataFrame(), width="stretch", hide_index=True)
+    social_snap = st.session_state.get("_social_intent_snapshot")
+    has_fetched = (
+        (isinstance(jobs, pd.DataFrame) and not jobs.empty)
+        or (isinstance(scored, pd.DataFrame) and not scored.empty)
+        or (isinstance(social_snap, pd.DataFrame) and not social_snap.empty)
+    )
+    if st.button(
+        "Save fetched data to NocoDB",
+        width="stretch",
+        key="hq_save_fetch_nocodb",
+        disabled=not has_fetched,
+        help="Upserts this session’s snapshot (job pull, company scores, social intent, geo/tiers) into your pipeline table — same payload as sidebar “Save pipeline to NocoDB”.",
+    ):
+        try:
+            _save_to_nocodb()
+            try:
+                append_event("pipeline_fetch_save", {"session_id": st.session_state.session_id})
+            except NocoDBError:
+                pass
+            st.success("Fetched data saved to your NocoDB pipeline table.")
+        except NocoDBError as exc:
+            st.error(str(exc))
+    st.caption("Requires `NOCODB_*` in `.env` or Streamlit secrets; uses `NOCODB_PIPELINE_TABLE_ID`.")
     c1, c2 = st.columns([1, 2])
     with c1:
         st.button("Back", disabled=True, width="stretch")
@@ -720,11 +829,16 @@ elif st.session_state.step == 2:
                     else:
                         n_en = len(st.session_state.leads_enriched)
                         enrich_status.update(state="complete")
-                        st.toast(f"Enrichment complete — {n_en} contacts.", icon="✓")
+                        st.toast(f"Enrichment complete — {n_en} contacts.", icon="✅")
+                        _maybe_auto_save_nocodb("enrichment")
                         st.rerun()
     else:
         st.success("Contacts generated — ready for sequence drafting.")
         st.dataframe(st.session_state.leads_enriched, width="stretch", hide_index=True)
+        st.caption(
+            "**LinkedIn** is left blank for LLM-drafted contacts. Outreach and CRM omit profile URLs until "
+            "**Enrichment verified** is true on a lead (e.g. after human verification in a future edit flow)."
+        )
         if st.button(
             "Generate smart role-based email suggestions",
             width="stretch",
@@ -759,8 +873,10 @@ elif st.session_state.step == 3:
     st.markdown(
         section_header(
             "Outreach",
-            "Sequences are generated with OpenRouter. Dispatch logs to NocoDB (no third-party email send in this build). "
-            "CRM rows stay system-coordinated until replies or exhaustion release the outreach lock for SDR action.",
+            "Sequences are generated with OpenRouter. LinkedIn profile URLs are omitted here until a lead is marked "
+            "**Enrichment verified** (draft contacts are email/name/title/company only). Dispatch logs to NocoDB "
+            "(no third-party email send in this build). CRM rows stay system-coordinated until replies or exhaustion "
+            "release the outreach lock for SDR action.",
         ),
         unsafe_allow_html=True,
     )
@@ -784,7 +900,8 @@ elif st.session_state.step == 3:
                 w_req = 0
                 touches_by_email: dict[str, int] = {}
                 skipped_high_intent: list[str] = []
-                for _, lead in le.iterrows():
+                for _, raw_lead in le.iterrows():
+                    lead = _outreach_lead_strip_unverified_linkedin(raw_lead)
                     em_addr = str(lead.get("Email", ""))
                     if em_addr in st.session_state.blacklist:
                         continue
@@ -826,7 +943,8 @@ elif st.session_state.step == 3:
                         + ", ".join(skipped_high_intent[:12])
                         + ("…" if len(skipped_high_intent) > 12 else "")
                     )
-        for _, lead in le.iterrows():
+        for _, raw_lead in le.iterrows():
+            lead = _outreach_lead_strip_unverified_linkedin(raw_lead)
             if str(lead.get("Email", "")) in st.session_state.blacklist:
                 continue
             n = escape(str(lead.get("Name", "")))

@@ -190,6 +190,12 @@ def get_openrouter_settings() -> OpenRouterSettings:
     )
 
 
+def auto_save_pipeline_to_nocodb() -> bool:
+    """When true, persist the pipeline snapshot after intent refresh and after enrichment (same payload as manual save)."""
+    v = _read_optional_env("AUTO_SAVE_PIPELINE_TO_NOCODB", "")
+    return v.lower() in ("1", "true", "yes", "on")
+
+
 def get_nocodb_settings() -> NocoDBSettings:
     return NocoDBSettings(
         base_url=_read_env("NOCODB_BASE_URL", "https://app.nocodb.com"),

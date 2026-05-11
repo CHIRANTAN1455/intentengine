@@ -108,6 +108,12 @@ def _openai_provider_chat(messages: list[dict[str, str]], temperature: float, ta
     payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
     if task == "corpus":
         payload["max_tokens"] = _openai_corpus_max_tokens()
+    else:
+        raw_mt = _read_optional_env("OPENAI_MAX_TOKENS", "512") or "512"
+        try:
+            payload["max_tokens"] = max(16, min(int(raw_mt), 8192))
+        except ValueError:
+            payload["max_tokens"] = 512
     body = _llm_post_json(
         base,
         {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -199,6 +205,15 @@ def _openrouter_corpus_max_tokens() -> int:
         return 16384
 
 
+def _openrouter_default_max_tokens() -> int:
+    """Cap completion tokens for normal chat calls (OpenRouter bills against max_tokens)."""
+    raw = _read_optional_env("OPENROUTER_MAX_TOKENS", "512") or "512"
+    try:
+        return max(16, min(int(raw), 8192))
+    except ValueError:
+        return 512
+
+
 def _openrouter_provider_chat(messages: list[dict[str, str]], temperature: float, task: str) -> str:
     if not _lookup_str("OPENROUTER_API_KEY"):
         raise LLMError("openrouter: OPENROUTER_API_KEY not set")
@@ -211,6 +226,8 @@ def _openrouter_provider_chat(messages: list[dict[str, str]], temperature: float
     payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
     if task == "corpus":
         payload["max_tokens"] = _openrouter_corpus_max_tokens()
+    else:
+        payload["max_tokens"] = _openrouter_default_max_tokens()
     body = _llm_post_json(
         settings.base_url,
         {
@@ -308,6 +325,7 @@ def generate_email_sequence_with_openrouter(
         "Generate a concise outbound sequence in JSON only.\n"
         "Rules: list length equals max_emails; each item has step (int), subject (string), body (string); "
         "professional tone, one CTA, no spammy claims.\n"
+        "Do not mention LinkedIn, profile views, or any social URLs — contact data is draft-only.\n"
         f"max_emails={max_emails}\n"
         f"lead_context={json.dumps(lead_context)}"
     )
@@ -315,7 +333,7 @@ def generate_email_sequence_with_openrouter(
         [
             {
                 "role": "system",
-                "content": "Return valid JSON only. No markdown fences.",
+                "content": "Return valid JSON only. No markdown fences. Never include LinkedIn URLs or claims of having viewed a profile.",
             },
             {"role": "user", "content": prompt},
         ],
@@ -478,7 +496,8 @@ def generate_enriched_contact_with_openrouter(company: str, intent_reason: str) 
         "Rules:\n"
         "- Email must be fictional (use example.com or companyname.com style), not a real person's inbox.\n"
         "- Title should be a plausible hiring leader for sales hiring.\n"
-        "- linkedin_url should be plausible but fictional.\n"
+        "- linkedin_url must be an empty string \"\". Do not invent profile URLs — they are unsafe and misleading.\n"
+        "- phone may be \"\" if unknown; do not fabricate phone numbers.\n"
         f"company={json.dumps(company)}\n"
         f"intent_reason={json.dumps(intent_reason)}\n"
     )
@@ -498,4 +517,5 @@ def generate_enriched_contact_with_openrouter(company: str, intent_reason: str) 
     out = {k: str(parsed.get(k, "") or "").strip() for k in ("first_name", "last_name", "title", "email", "linkedin_url", "phone")}
     if not out["first_name"] or not out["last_name"] or not out["email"]:
         raise OpenRouterError("Incomplete contact JSON.")
+    out["linkedin_url"] = ""
     return out
