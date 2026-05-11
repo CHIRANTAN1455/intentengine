@@ -421,10 +421,9 @@ def _ensure_intent():
                 nj = len(jobs) if isinstance(jobs, pd.DataFrame) else 0
                 nc = len(scored) if isinstance(scored, pd.DataFrame) else 0
                 prog.progress(100, text="Complete")
-                pipe.update(
-                    label=f"Done — {nj} job postings, {nc} companies scored.",
-                    state="complete",
-                )
+                # Avoid custom label on state="complete" — overlaps with Streamlit's completion chrome.
+                pipe.update(state="complete")
+                st.toast(f"Intent ready — {nj} job postings, {nc} companies scored.", icon="✓")
         except Exception as exc:
             if pipe_ref is not None:
                 pipe_ref.update(
@@ -447,13 +446,12 @@ def _ensure_intent():
 st.markdown(get_global_css(), unsafe_allow_html=True)
 
 # Native Streamlit boot: first paint only (avoids flashing on every rerun).
+# Use a spinner only — collapsed st.status + state="complete" can render overlapping labels
+# (built-in check / “Complete” vs custom text) on some Streamlit versions.
 if not st.session_state._native_session_bootstrap_done:
-    with st.status("Starting hirequity", expanded=False) as _boot:
-        _boot.update(label="Loading saved pipeline from NocoDB…", state="running")
+    with st.spinner("Loading workspace — session snapshot and region…"):
         _hydrate_from_nocodb()
-        _boot.update(label="Resolving viewer region for job mix…", state="running")
         _viewer_geo_maybe_refresh()
-        _boot.update(label="Workspace ready.", state="complete")
     st.session_state._native_session_bootstrap_done = True
 else:
     _hydrate_from_nocodb()
@@ -720,11 +718,9 @@ elif st.session_state.step == 2:
                         enrich_status.update(label=f"Enrichment failed: {exc}", state="error")
                         st.error(f"Enrichment failed. Details: {exc}")
                     else:
-                        enrich_status.update(
-                            label=f"Added {len(st.session_state.leads_enriched)} enriched contacts.",
-                            state="complete",
-                        )
-                        st.toast("Enrichment complete.", icon="✓")
+                        n_en = len(st.session_state.leads_enriched)
+                        enrich_status.update(state="complete")
+                        st.toast(f"Enrichment complete — {n_en} contacts.", icon="✓")
                         st.rerun()
     else:
         st.success("Contacts generated — ready for sequence drafting.")
