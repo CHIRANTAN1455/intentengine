@@ -1,6 +1,8 @@
 """Premium visual system for hirequity (Streamlit-injected CSS)."""
 from __future__ import annotations
 
+from html import escape
+
 BRAND = "hirequity"
 
 
@@ -272,8 +274,138 @@ def get_global_css() -> str:
     0%, 100% { transform: translateX(0%); width: 38%; }
     50% { transform: translateX(130%); width: 52%; }
   }
+
+  /* --- Client welcome landing --- */
+  .hq-welcome-wrap {
+    position: relative;
+    min-height: 72vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 2rem 1.25rem 3rem;
+    margin: -0.5rem -1rem 1.5rem;
+    border-radius: 24px;
+    border: 1px solid var(--hq-border);
+    background: radial-gradient(ellipse 100% 80% at 50% -20%, rgba(124, 58, 237, 0.35), transparent 55%),
+      linear-gradient(165deg, rgba(15, 10, 28, 0.95) 0%, rgba(8, 8, 14, 0.98) 100%);
+    overflow: hidden;
+  }
+  .hq-welcome-wrap::before {
+    content: "";
+    position: absolute;
+    width: 140%;
+    height: 140%;
+    top: -20%;
+    left: -20%;
+    background: radial-gradient(circle at 30% 40%, rgba(168, 85, 247, 0.15), transparent 42%),
+      radial-gradient(circle at 70% 55%, rgba(34, 211, 238, 0.12), transparent 40%);
+    animation: hq-welcome-aurora 14s ease-in-out infinite alternate;
+    pointer-events: none;
+  }
+  .hq-welcome-wrap::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    opacity: 0.5;
+    pointer-events: none;
+  }
+  @keyframes hq-welcome-aurora {
+    0% { transform: translate(0, 0) rotate(0deg); }
+    100% { transform: translate(-3%, 2%) rotate(4deg); }
+  }
+  .hq-welcome-inner { position: relative; z-index: 2; max-width: 640px; }
+  .hq-welcome-kicker {
+    display: inline-block;
+    font-size: 0.68rem;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: #c4b5fd !important;
+    margin-bottom: 1rem;
+    animation: hq-fade-up 1s ease-out both;
+  }
+  .hq-welcome-title {
+    font-size: clamp(2.1rem, 5vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.08;
+    margin: 0 0 1rem;
+    background: linear-gradient(120deg, #fff 0%, #e9d5ff 35%, #a5f3fc 70%, #fff 100%);
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: hq-fade-up 0.9s ease-out 0.12s both, hq-shimmer-text 5s linear infinite;
+  }
+  @keyframes hq-shimmer-text {
+    0% { background-position: 0% center; }
+    100% { background-position: 200% center; }
+  }
+  @keyframes hq-fade-up {
+    from { opacity: 0; transform: translateY(18px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .hq-welcome-lead {
+    font-size: 1.05rem;
+    line-height: 1.65;
+    color: #d4d4d8 !important;
+    margin: 0 0 1.75rem;
+    animation: hq-fade-up 0.85s ease-out 0.28s both;
+  }
+  .hq-welcome-orbs {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .hq-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(40px);
+    opacity: 0.5;
+    animation: hq-orb-float 8s ease-in-out infinite;
+  }
+  .hq-orb.a { width: 180px; height: 180px; background: #7c3aed; top: 8%; left: 5%; animation-delay: 0s; }
+  .hq-orb.b { width: 220px; height: 220px; background: #0891b2; bottom: 5%; right: 0%; animation-delay: -2s; }
+  .hq-orb.c { width: 120px; height: 120px; background: #a855f7; top: 40%; right: 12%; animation-delay: -4s; }
+  @keyframes hq-orb-float {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50% { transform: translate(12px, -16px) scale(1.06); }
+  }
+  .hq-welcome-foot {
+    font-size: 0.78rem;
+    color: #71717a !important;
+    margin-top: 1.25rem;
+    animation: hq-fade-up 1s ease-out 0.55s both;
+  }
 </style>
 """
+
+
+def render_client_welcome(brand: str) -> str:
+    """Full-width animated welcome panel (use with get_global_css already on the page)."""
+    safe = escape(brand)
+    return f"""
+    <div class="hq-welcome-wrap">
+      <div class="hq-welcome-orbs" aria-hidden="true">
+        <div class="hq-orb a"></div>
+        <div class="hq-orb b"></div>
+        <div class="hq-orb c"></div>
+      </div>
+      <div class="hq-welcome-inner">
+        <span class="hq-welcome-kicker">Welcome</span>
+        <h1 class="hq-welcome-title">{safe}</h1>
+        <p class="hq-welcome-lead">
+          Your live hiring-intent workspace is warming up in the background — job boards, scoring,
+          and pipeline context — so when you step in, the first rows are already in motion.
+        </p>
+        <p class="hq-welcome-foot">
+          Take a moment to review the story above, then enter the command center when you are ready.
+        </p>
+      </div>
+    </div>
+    """
 
 
 def render_hero(brand: str) -> str:

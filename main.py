@@ -1,5 +1,8 @@
 import json
+import math
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from html import escape
 from typing import Any
 
@@ -41,6 +44,7 @@ from ui_theme import (
     get_global_css,
     glass_card_end,
     glass_card_start,
+    render_client_welcome,
     render_hero,
     render_stat_grid,
     render_stepper,
@@ -92,6 +96,10 @@ if "max_job_age_days" not in st.session_state:
     st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
 if "_native_session_bootstrap_done" not in st.session_state:
     st.session_state._native_session_bootstrap_done = False
+if "client_landing_dismissed" not in st.session_state:
+    st.session_state.client_landing_dismissed = False
+if st.session_state.get("_skip_welcome_forever"):
+    st.session_state.client_landing_dismissed = True
 
 
 def prev_step():
@@ -185,6 +193,102 @@ def _viewer_geo_maybe_refresh() -> None:
     st.session_state._viewer_geo_ttl = now + 3600.0
 
 
+def _prefetch_intent_worker(max_age: int, geo_hint: dict[str, Any] | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Runs off the main Streamlit thread — must not call any ``st.*`` APIs."""
+    return run_intent_stage(max_job_age_days=max_age, geo_hint=geo_hint, on_jobs_stream=None)
+
+
+def _maybe_start_client_intent_prefetch() -> None:
+    if st.session_state.get("client_landing_dismissed"):
+        return
+    if st.session_state.get("_intent_prefetch_submitted"):
+        return
+    if isinstance(st.session_state.get("company_scored"), pd.DataFrame) and not st.session_state.company_scored.empty:
+        st.session_state._intent_prefetch_submitted = True
+        return
+    max_age = max(1, min(int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)), MAX_JOB_POSTING_AGE_DAYS))
+    gh = st.session_state.get("_viewer_geo")
+    gh = gh if isinstance(gh, dict) else None
+    ex = st.session_state.get("_prefetch_executor")
+    if ex is None:
+        ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hq_welcome")
+        st.session_state._prefetch_executor = ex
+    fut = ex.submit(_prefetch_intent_worker, max_age, gh)
+    st.session_state._intent_prefetch_future = fut
+    st.session_state._intent_prefetch_submitted = True
+
+
+def _try_merge_prefetch_future() -> bool:
+    fut = st.session_state.get("_intent_prefetch_future")
+    if fut is None or not fut.done():
+        return False
+    try:
+        jobs, scored = fut.result(timeout=0)
+    except Exception as exc:
+        st.session_state._intent_prefetch_future = None
+        st.session_state._intent_prefetch_error = str(exc)
+        return False
+    st.session_state._intent_prefetch_future = None
+    st.session_state.company_jobs = jobs
+    st.session_state.company_scored = scored
+    st.session_state._intent_max_age_applied = max(
+        1, min(int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)), MAX_JOB_POSTING_AGE_DAYS)
+    )
+    st.session_state._intent_geo_key_applied = corpus_geo_cache_key(st.session_state.get("_viewer_geo"))
+    st.session_state._intent_prefetch_ready = True
+    st.session_state.pop("_intent_prefetch_error", None)
+    return True
+
+
+def _drain_prefetch_future_blocking() -> None:
+    """If user leaves the welcome screen while the worker is still running, block briefly once."""
+    fut = st.session_state.get("_intent_prefetch_future")
+    if fut is None:
+        return
+    if fut.done():
+        _try_merge_prefetch_future()
+        return
+    with st.spinner("Finishing the background intent snapshot…"):
+        try:
+            jobs, scored = fut.result(timeout=300)
+        except Exception:
+            st.session_state._intent_prefetch_future = None
+            return
+    st.session_state._intent_prefetch_future = None
+    st.session_state.company_jobs = jobs
+    st.session_state.company_scored = scored
+    st.session_state._intent_max_age_applied = max(
+        1, min(int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)), MAX_JOB_POSTING_AGE_DAYS)
+    )
+    st.session_state._intent_geo_key_applied = corpus_geo_cache_key(st.session_state.get("_viewer_geo"))
+    st.session_state._intent_prefetch_ready = True
+    st.session_state.pop("_intent_prefetch_error", None)
+
+
+@st.fragment(run_every=timedelta(seconds=0.42))
+def _client_welcome_background_fragment() -> None:
+    """Polls prefetch completion and animates native progress while the welcome screen is visible."""
+    if st.session_state.get("client_landing_dismissed"):
+        return
+    merged = _try_merge_prefetch_future()
+    if merged and not st.session_state.get("_prefetch_ready_toast_shown"):
+        st.toast("Intent snapshot is ready — enter the command center when you like.", icon="✨")
+        st.session_state._prefetch_ready_toast_shown = True
+    prog_slot = st.empty()
+    fut = st.session_state.get("_intent_prefetch_future")
+    if st.session_state.get("_intent_prefetch_ready"):
+        prog_slot.progress(1.0, text="Intent snapshot ready")
+    elif fut is not None and not fut.done():
+        pulse = 0.18 + 0.72 * (0.5 + 0.5 * math.sin(time.monotonic() * 2.05))
+        prog_slot.progress(min(0.94, pulse), text="Fetching listings & scores in the background…")
+    elif st.session_state.get("_intent_prefetch_error"):
+        prog_slot.warning("Background fetch reported an issue — we will retry after you enter.")
+    elif st.session_state.get("_intent_prefetch_submitted"):
+        prog_slot.progress(0.12, text="Starting background pull…")
+    else:
+        prog_slot.progress(0.05, text="Preparing background pull…")
+
+
 def _save_to_nocodb() -> None:
     payload = _payload_for_save()
     upsert_snapshot(st.session_state.session_id, int(st.session_state.step), payload)
@@ -222,6 +326,7 @@ def _hydrate_from_nocodb() -> None:
 
 
 def _ensure_intent():
+    _drain_prefetch_future_blocking()
     max_age = int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS))
     max_age = max(1, min(max_age, MAX_JOB_POSTING_AGE_DAYS))
     cached = st.session_state.get("_intent_max_age_applied")
@@ -345,6 +450,12 @@ with st.sidebar:
         st.session_state.session_id = (st.session_state.session_id_in or "default").strip()
         st.session_state.nocodb_hydrated = False
         st.session_state._native_session_bootstrap_done = False
+        st.session_state.client_landing_dismissed = False
+        st.session_state._intent_prefetch_submitted = False
+        st.session_state.pop("_intent_prefetch_future", None)
+        st.session_state.pop("_intent_prefetch_ready", None)
+        st.session_state.pop("_prefetch_ready_toast_shown", None)
+        st.session_state.pop("_intent_prefetch_error", None)
         st.session_state.pop("_intent_geo_key_applied", None)
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
@@ -374,6 +485,15 @@ with st.sidebar:
     st.caption(
         f"Country priority target: ~{int(round(CORPUS_CA_JOB_SHARE * 100))}% Canada / {int(round(CORPUS_US_JOB_SHARE * 100))}% US."
     )
+    if st.session_state.get("client_landing_dismissed"):
+        if st.button("Show client welcome", width="stretch"):
+            st.session_state.client_landing_dismissed = False
+            st.session_state._intent_prefetch_submitted = False
+            st.session_state.pop("_intent_prefetch_future", None)
+            st.session_state.pop("_intent_prefetch_ready", None)
+            st.session_state.pop("_prefetch_ready_toast_shown", None)
+            st.session_state.pop("_intent_prefetch_error", None)
+            st.rerun()
 
     if st.button("Save pipeline to NocoDB", width="stretch"):
         try:
@@ -395,6 +515,31 @@ with st.sidebar:
         st.session_state._native_session_bootstrap_done = False
         st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
         st.rerun()
+
+# --- Client welcome (first screen): animated landing + background intent prefetch ---
+if not st.session_state.get("client_landing_dismissed"):
+    st.markdown(render_client_welcome(BRAND), unsafe_allow_html=True)
+    st.markdown(
+        "<p style='text-align:center;color:#a1a1aa;font-size:0.95rem;margin:-0.5rem 0 1.25rem;max-width:520px;margin-left:auto;margin-right:auto;'>"
+        "Live listings and scores load in the background while you read — by the time you enter, "
+        "the first batch is often already on the board.</p>",
+        unsafe_allow_html=True,
+    )
+    _maybe_start_client_intent_prefetch()
+    _client_welcome_background_fragment()
+    c_enter, c_skip, c_hint = st.columns([1.05, 1.15, 1.8])
+    with c_enter:
+        if st.button("Enter command center", type="primary", width="stretch", key="hq_landing_enter"):
+            st.session_state.client_landing_dismissed = True
+            st.rerun()
+    with c_skip:
+        if st.button("Skip welcome next time", width="stretch", key="hq_landing_skip_forever"):
+            st.session_state._skip_welcome_forever = True
+            st.session_state.client_landing_dismissed = True
+            st.rerun()
+    with c_hint:
+        st.caption("Stay a few seconds for the shimmer — your pipeline is already spinning up.")
+    st.stop()
 
 _ensure_intent()
 jobs = st.session_state.company_jobs
