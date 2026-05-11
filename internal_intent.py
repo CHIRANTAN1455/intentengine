@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -13,6 +14,8 @@ from openrouter_client import OpenRouterError, generate_intent_corpus_with_openr
 
 # Per–geo-hint cache (15 min) so different viewers do not share the wrong region.
 _CORPUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CORPUS_MAX_FETCH_THREADS = 3
+_CORPUS_FETCH_ATTEMPTS = 3
 
 
 def invalidate_intent_corpus_cache() -> None:
@@ -62,18 +65,85 @@ def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     if entry and now < entry[0]:
         return entry[1]
     corpus: dict[str, Any] = {"jobs": [], "social": []}
-    for _ in range(3):
-        try:
-            chunk = generate_intent_corpus_with_openrouter(geo_hint=geo_hint)
+    with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
+        futures = [
+            ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
+            for _ in range(_CORPUS_FETCH_ATTEMPTS)
+        ]
+        for fut in as_completed(futures):
+            try:
+                chunk = fut.result()
+            except OpenRouterError:
+                continue
             corpus = _merge_corpora(corpus, chunk)
             if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
                 break
-        except OpenRouterError:
-            if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
-                break
-            continue
     _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
     return corpus
+
+
+def _job_rows_from_raw_jobs(raw_jobs: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in raw_jobs:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("title") or item.get("role") or "")
+        company = str(item.get("companyName") or item.get("company") or "").strip()
+        if not company or not role or not _is_sales_role(role):
+            continue
+        rows.append(
+            {
+                "Company": company,
+                "Role": role,
+                "Job URL": str(item.get("url") or item.get("jobUrl") or ""),
+                "Posting date": _parse_posted_date(item.get("postedAt") or item.get("datePosted")),
+                "Source": str(item.get("source") or "inhouse_openrouter"),
+                "Country code": str(item.get("countryCode") or "").strip().upper(),
+            }
+        )
+    return rows
+
+
+def fetch_job_postings_stream(
+    geo_hint: dict[str, Any] | None = None,
+    on_rows: Callable[[pd.DataFrame], None] | None = None,
+) -> pd.DataFrame:
+    """
+    Progressive fetch for UI streaming.
+    Calls on_rows(partial_dataframe) after each corpus chunk.
+    """
+    now = time.time()
+    key = _corpus_cache_key(geo_hint)
+    entry = _CORPUS_CACHE.get(key)
+    if entry and now < entry[0]:
+        cached_jobs = _enforce_na_job_mix(list(entry[1].get("jobs", []) or []))
+        df = pd.DataFrame(_job_rows_from_raw_jobs(cached_jobs))
+        if on_rows is not None:
+            on_rows(df)
+        return df
+
+    corpus: dict[str, Any] = {"jobs": [], "social": []}
+    with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
+        futures = [
+            ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
+            for _ in range(_CORPUS_FETCH_ATTEMPTS)
+        ]
+        for fut in as_completed(futures):
+            try:
+                chunk = fut.result()
+            except OpenRouterError:
+                continue
+            corpus = _merge_corpora(corpus, chunk)
+            partial_jobs = _enforce_na_job_mix(list(corpus.get("jobs", []) or []))
+            partial_df = pd.DataFrame(_job_rows_from_raw_jobs(partial_jobs))
+            if on_rows is not None:
+                on_rows(partial_df)
+            if len(partial_jobs) >= INTENT_CORPUS_MIN_JOBS:
+                break
+
+    _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
+    jobs = _enforce_na_job_mix(list(corpus.get("jobs", []) or []))
+    return pd.DataFrame(_job_rows_from_raw_jobs(jobs))
 
 
 def _enforce_na_job_mix(jobs: list[Any]) -> list[Any]:
@@ -126,25 +196,7 @@ def fetch_job_postings(geo_hint: dict[str, Any] | None = None) -> pd.DataFrame:
     corpus = _get_corpus(geo_hint)
     raw_jobs = list(corpus.get("jobs", []) or [])
     raw_jobs = _enforce_na_job_mix(raw_jobs)
-    rows: list[dict[str, Any]] = []
-    for item in raw_jobs:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("title") or item.get("role") or "")
-        company = str(item.get("companyName") or item.get("company") or "").strip()
-        if not company or not role or not _is_sales_role(role):
-            continue
-        rows.append(
-            {
-                "Company": company,
-                "Role": role,
-                "Job URL": str(item.get("url") or item.get("jobUrl") or ""),
-                "Posting date": _parse_posted_date(item.get("postedAt") or item.get("datePosted")),
-                "Source": str(item.get("source") or "inhouse_openrouter"),
-                "Country code": str(item.get("countryCode") or "").strip().upper(),
-            }
-        )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(_job_rows_from_raw_jobs(raw_jobs))
 
 
 def fetch_social_intent(geo_hint: dict[str, Any] | None = None) -> pd.DataFrame:

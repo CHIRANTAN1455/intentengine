@@ -237,8 +237,28 @@ def _ensure_intent():
         or cached != max_age
         or cached_geo != geo_key
     ):
+        loader_slot = st.empty()
+        stream_info_slot = st.empty()
+        stream_table_slot = st.empty()
+
+        def _on_jobs_stream(partial_jobs: pd.DataFrame) -> None:
+            if partial_jobs is None or partial_jobs.empty:
+                return
+            live_df = partial_jobs.copy()
+            if "Posting date" in live_df.columns:
+                live_df = live_df.sort_values("Posting date", ascending=False)
+            stream_info_slot.markdown(
+                f"**Live fetch:** {len(live_df)} rows loaded so far. "
+                "Keep watching while additional rows stream in..."
+            )
+            stream_table_slot.dataframe(
+                live_df.head(120),
+                use_container_width=True,
+                hide_index=True,
+            )
+
         try:
-            st.markdown(
+            loader_slot.markdown(
                 render_loader(
                     "Building intent corpus",
                     "Generating a high-volume job feed (70+ rows), applying geo weighting, and scoring company intent.",
@@ -246,11 +266,18 @@ def _ensure_intent():
                 unsafe_allow_html=True,
             )
             with st.spinner("Generating intent corpus and scoring companies..."):
-                jobs, scored = run_intent_stage(max_job_age_days=max_age, geo_hint=geo_hint)
+                jobs, scored = run_intent_stage(
+                    max_job_age_days=max_age,
+                    geo_hint=geo_hint,
+                    on_jobs_stream=_on_jobs_stream,
+                )
             st.session_state.company_jobs = jobs
             st.session_state.company_scored = scored
             st.session_state._intent_max_age_applied = max_age
             st.session_state._intent_geo_key_applied = geo_key
+            loader_slot.empty()
+            stream_info_slot.empty()
+            stream_table_slot.empty()
         except Exception as exc:
             st.error(f"Intent stage failed. Check OpenRouter credentials. Details: {exc}")
             st.session_state.company_jobs = pd.DataFrame()

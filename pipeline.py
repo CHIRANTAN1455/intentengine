@@ -4,11 +4,13 @@ Linear pipeline: Intent (jobs + social) → company merge → scoring →
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import pandas as pd
 
 from config import MAX_JOB_POSTING_AGE_DAYS
 from intent_engine import add_job_signals, aggregate_by_company
-from internal_intent import fetch_job_postings, fetch_social_intent
+from internal_intent import fetch_job_postings, fetch_job_postings_stream, fetch_social_intent
 from scoring import filter_tiers, score_companies
 
 
@@ -43,6 +45,7 @@ def _social_counts(geo_hint: dict | None = None) -> pd.DataFrame:
 def run_intent_stage(
     max_job_age_days: int | None = None,
     geo_hint: dict | None = None,
+    on_jobs_stream: Callable[[pd.DataFrame], None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Returns (job_postings_with_signals, company_scored).
@@ -51,7 +54,11 @@ def run_intent_stage(
     max_job_age_days: keep only postings with job age <= this value (capped at MAX_JOB_POSTING_AGE_DAYS).
     geo_hint: optional viewer region (IP-derived) to bias synthetic corpus toward US/Canada + local area.
     """
-    raw_jobs = fetch_job_postings(geo_hint=geo_hint)
+    raw_jobs = (
+        fetch_job_postings_stream(geo_hint=geo_hint, on_rows=on_jobs_stream)
+        if on_jobs_stream is not None
+        else fetch_job_postings(geo_hint=geo_hint)
+    )
     if raw_jobs.empty:
         company = pd.DataFrame()
         return raw_jobs, company
