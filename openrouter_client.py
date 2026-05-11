@@ -3,76 +3,29 @@
 from __future__ import annotations
 
 import json
-import time
 from datetime import date, timedelta
 from typing import Any
 
-import requests
-
 from config import (
-    CORPUS_NA_JOB_SHARE,
+    CORPUS_CA_JOB_SHARE,
+    CORPUS_US_JOB_SHARE,
     INTENT_CORPUS_MAX_JOBS,
     INTENT_CORPUS_MIN_JOBS,
     MAX_JOB_POSTING_AGE_DAYS,
-    get_openrouter_settings,
 )
+
+from llm_client import LLMError, chat_completion as _llm_chat_completion
 
 
 class OpenRouterError(RuntimeError):
-    """Raised for upstream OpenRouter failures."""
+    """Raised for upstream LLM / OpenRouter failures."""
 
 
 def _chat_completion(messages: list[dict[str, str]], temperature: float) -> str:
     try:
-        settings = get_openrouter_settings()
-    except Exception as exc:
-        raise OpenRouterError(f"OpenRouter settings error: {exc}") from exc
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": settings.http_referer,
-        "X-Title": settings.app_title,
-    }
-    payload = {
-        "model": settings.model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-
-    attempts = 3
-    last_err = ""
-    retryable_status = {408, 409, 425, 429, 500, 502, 503, 504}
-    for attempt in range(1, attempts + 1):
-        try:
-            response = requests.post(
-                settings.base_url,
-                headers=headers,
-                json=payload,
-                timeout=settings.timeout_seconds,
-            )
-            if response.status_code >= 400:
-                body_preview = (response.text or "")[:240]
-                err = f"HTTP {response.status_code}: {body_preview}"
-                if response.status_code in retryable_status and attempt < attempts:
-                    last_err = err
-                    time.sleep(0.8 * attempt)
-                    continue
-                raise OpenRouterError(err)
-            body = response.json()
-            return (
-                body.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
-        except OpenRouterError:
-            raise
-        except Exception as exc:  # nosec - network/provider error capture
-            last_err = str(exc)
-            if attempt == attempts:
-                break
-            time.sleep(0.8 * attempt)
-    raise OpenRouterError(f"OpenRouter request failed after retries: {last_err}")
+        return _llm_chat_completion(messages, temperature)
+    except LLMError as exc:
+        raise OpenRouterError(str(exc)) from exc
 
 
 def classify_reply_with_openrouter(text: str) -> str:
@@ -174,7 +127,8 @@ def suggest_role_strategy_with_openrouter(role_context: dict[str, str]) -> dict[
 
 
 def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
-    pct = int(round(100 * CORPUS_NA_JOB_SHARE))
+    pct_ca = int(round(100 * CORPUS_CA_JOB_SHARE))
+    pct_us = int(round(100 * CORPUS_US_JOB_SHARE))
     g = geo_hint or {}
     summary = str(g.get("summary") or "Viewer location unknown; use major US and Canadian tech hubs.")
     in_na = bool(g.get("in_na"))
@@ -183,8 +137,8 @@ def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
     cc = str(g.get("countryCode") or "")
     lines = [
         "Geography:",
-        f"- About {pct}% of jobs must be for companies headquartered or hiring in the **United States** or **Canada** (realistic company names and metros).",
-        f"- At most about {100 - pct}% of jobs may be outside US/Canada (other regions).",
+        f"- Country mix target: about {pct_ca}% of jobs in **Canada** and {pct_us}% in the **United States**.",
+        "- Keep nearly all jobs in Canada/US; avoid other countries unless explicitly needed for diversity.",
         f"- Viewer context (IP-derived, approximate): {summary}",
     ]
     if in_na and (city or region):
@@ -196,7 +150,7 @@ def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
             "- The viewer is outside US/Canada; still keep the US+Canada job share as above (North American GTM hiring demand)."
         )
     lines.append(
-        '- Every job must include "countryCode": "US" or "CA" (or occasionally another ISO-3166 alpha-2 for the small non-NA share).'
+        '- Every job must include "countryCode" and use only "CA" or "US".'
     )
     lines.append(
         "- Social rows should reference the same companies / hiring motion; keep geography consistent with the jobs."
