@@ -39,6 +39,34 @@ from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
 from outreach import dispatch_email_internal
 from pipeline import filter_outreach_ready, run_intent_stage
+
+
+def _build_ready_for_enrich(
+    scored: pd.DataFrame | None,
+    min_tier: list[str] | None,
+) -> pd.DataFrame:
+    """High/Medium (or selected) companies for the enrichment queue — same rules as the Scoring step."""
+    if scored is None or scored.empty:
+        return pd.DataFrame()
+    ready = filter_outreach_ready(scored)
+    if not min_tier and not ready.empty:
+        return pd.DataFrame()
+    if min_tier and not ready.empty:
+        if "Intent tier" not in ready.columns:
+            return ready
+        ready = ready[ready["Intent tier"].isin(min_tier)].copy()
+    return ready
+
+
+def _enrichment_queue_df() -> pd.DataFrame:
+    """Prefer the snapshot from Scoring; if missing (e.g. deep-linked step), rebuild from scored + sidebar tiers."""
+    snap = st.session_state.get("_ready_for_enrich")
+    if isinstance(snap, pd.DataFrame) and not snap.empty:
+        return snap
+    mt = st.session_state.get("outreach_tiers")
+    if not isinstance(mt, list):
+        mt = ["High", "Medium"]
+    return _build_ready_for_enrich(st.session_state.get("company_scored"), mt)
 from reply_classification import classify_reply_text, crm_eligible
 from ui_theme import (
     get_global_css,
@@ -103,7 +131,11 @@ if st.session_state.get("_skip_welcome_forever"):
 
 
 def prev_step():
-    st.session_state.step = max(0, st.session_state.step - 1)
+    cur = int(st.session_state.step)
+    st.session_state.step = max(0, cur - 1)
+    if cur == 2:
+        st.session_state.leads_enriched = None
+        st.session_state.role_suggestions = None
 
 
 def _serialize_blacklist() -> list[str]:
@@ -478,7 +510,14 @@ with st.sidebar:
         key="max_job_age_days",
         help=f"Listings older than this many days are dropped (hard cap {MAX_JOB_POSTING_AGE_DAYS} days ≈ 3 weeks).",
     )
-    min_tier = st.multiselect("Outreach tiers", ["High", "Medium"], default=["High", "Medium"])
+    st.multiselect(
+        "Outreach tiers",
+        ["High", "Medium"],
+        default=["High", "Medium"],
+        key="outreach_tiers",
+        help="Companies outside these tiers are hidden from enrichment and downstream outreach.",
+    )
+    min_tier = list(st.session_state.get("outreach_tiers") or ["High", "Medium"])
     vg = st.session_state.get("_viewer_geo")
     if isinstance(vg, dict) and vg.get("summary"):
         st.caption(vg["summary"])
@@ -617,11 +656,7 @@ elif st.session_state.step == 1:
         st.warning("No companies in intent pipeline.")
     else:
         st.dataframe(scored, width="stretch", hide_index=True)
-    ready = filter_outreach_ready(scored) if scored is not None and not scored.empty else pd.DataFrame()
-    if (not min_tier) and ready is not None and not ready.empty:
-        ready = pd.DataFrame()
-    elif min_tier and ready is not None and not ready.empty:
-        ready = ready[ready["Intent tier"].isin(min_tier)]
+    ready = _build_ready_for_enrich(scored, min_tier)
     m1, m2 = st.columns(2)
     with m1:
         st.metric("Qualified for enrichment", len(ready))
@@ -632,8 +667,9 @@ elif st.session_state.step == 1:
     with c1:
         st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
-        if st.button("Run enrichment →", type="primary", width="stretch"):
+        if st.button("Run enrichment →", type="primary", width="stretch", key="hq_goto_enrich"):
             st.session_state.step = 2
+            st.session_state._ready_for_enrich = ready
             st.rerun()
 
 # --- STEP 2: ENRICHMENT ---
@@ -646,27 +682,60 @@ elif st.session_state.step == 2:
         ),
         unsafe_allow_html=True,
     )
-    ready = st.session_state.get("_ready_for_enrich", pd.DataFrame())
+    ready = _enrichment_queue_df()
+    st.session_state._ready_for_enrich = ready
     st.markdown("<div class='hq-glass'>", unsafe_allow_html=True)
+    if ready.empty:
+        st.warning(
+            "No companies match **Outreach tiers** as High/Medium (or your selection is empty). "
+            "Open the sidebar, include the tiers you need, then go back to **Scoring** so the queue refreshes."
+        )
+    else:
+        st.caption(f"{len(ready)} compan{'y' if len(ready) == 1 else 'ies'} in the enrichment queue.")
     if st.session_state.leads_enriched is None:
-        if st.button("Execute enrichment", type="primary", width="stretch"):
-            bar = st.progress(0)
-            for i in range(100):
-                time.sleep(0.006)
-                bar.progress(i + 1)
-            if ready is None or ready.empty:
-                st.error("No qualified companies. Return to scoring.")
+        if st.button(
+            "Execute enrichment",
+            type="primary",
+            width="stretch",
+            key="hq_execute_enrich",
+            disabled=ready.empty,
+        ):
+            ready_run = _enrichment_queue_df()
+            st.session_state._ready_for_enrich = ready_run
+            if ready_run.empty:
+                st.error(
+                    "No qualified companies to enrich. Adjust **Outreach tiers** in the sidebar or return to "
+                    "**Intent** for more hiring signals, then **Scoring** again."
+                )
             else:
-                try:
-                    st.session_state.leads_enriched = waterfall_enrichment(ready)
-                except Exception as exc:
-                    st.error(f"Enrichment failed. Details: {exc}")
-            st.rerun()
+                with st.status("Enrichment", expanded=True) as enrich_status:
+                    enrich_status.update(
+                        label=f"Generating contacts for {len(ready_run)} companies (LLM calls)…",
+                        state="running",
+                    )
+                    try:
+                        with st.spinner("This step calls the model once per company — please wait."):
+                            st.session_state.leads_enriched = waterfall_enrichment(ready_run)
+                    except Exception as exc:
+                        enrich_status.update(label=f"Enrichment failed: {exc}", state="error")
+                        st.error(f"Enrichment failed. Details: {exc}")
+                    else:
+                        enrich_status.update(
+                            label=f"Added {len(st.session_state.leads_enriched)} enriched contacts.",
+                            state="complete",
+                        )
+                        st.toast("Enrichment complete.", icon="✓")
+                        st.rerun()
     else:
         st.success("Contacts generated — ready for sequence drafting.")
         st.dataframe(st.session_state.leads_enriched, width="stretch", hide_index=True)
-        if st.button("Generate smart role-based email suggestions", width="stretch"):
+        if st.button(
+            "Generate smart role-based email suggestions",
+            width="stretch",
+            key="hq_role_suggestions",
+        ):
             st.session_state.role_suggestions = role_based_suggestions(st.session_state.leads_enriched)
+            st.rerun()
         if st.session_state.role_suggestions is not None:
             st.markdown("**Smart personalization suggestions (by enriched role)**")
             st.dataframe(st.session_state.role_suggestions, width="stretch", hide_index=True)
