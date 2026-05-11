@@ -5,6 +5,38 @@ from html import escape
 
 BRAND = "hirequity"
 
+# Tiny scene: night skyline + rising “intent” bars (72×32, crisp-edge rects).
+_WELCOME_PIXEL_SVG = """
+<svg viewBox="0 0 72 32" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges" aria-hidden="true">
+  <rect width="72" height="32" fill="#0c0618"/>
+  <rect x="0" y="0" width="72" height="14" fill="#140a28"/>
+  <rect x="5" y="4" width="1" height="1" fill="#fde68a"/>
+  <rect x="22" y="2" width="1" height="1" fill="#e9d5ff"/>
+  <rect x="58" y="5" width="1" height="1" fill="#a5f3fc"/>
+  <rect x="44" y="8" width="1" height="1" fill="#fde68a"/>
+  <rect x="6" y="14" width="14" height="14" fill="#31285a"/>
+  <rect x="9" y="17" width="2" height="2" fill="#fbbf24"/>
+  <rect x="13" y="20" width="2" height="2" fill="#fbbf24"/>
+  <rect x="9" y="23" width="2" height="2" fill="#fbbf24"/>
+  <rect x="52" y="10" width="14" height="18" fill="#2a1f4a"/>
+  <rect x="55" y="13" width="2" height="2" fill="#67e8f9"/>
+  <rect x="59" y="16" width="2" height="2" fill="#67e8f9"/>
+  <rect x="63" y="19" width="2" height="2" fill="#67e8f9"/>
+  <rect x="26" y="27" width="20" height="1" fill="#3f3b55"/>
+  <rect x="28" y="19" width="4" height="8" fill="#6d28d9"/>
+  <rect x="34" y="16" width="4" height="11" fill="#7c3aed"/>
+  <rect x="40" y="21" width="4" height="6" fill="#5b21b6"/>
+  <rect x="46" y="13" width="4" height="14" fill="#a855f7"/>
+  <rect x="30" y="27" width="4" height="1" fill="#22d3ee"/>
+  <rect x="36" y="27" width="4" height="1" fill="#22d3ee"/>
+  <rect x="42" y="27" width="4" height="1" fill="#22d3ee"/>
+  <rect x="48" y="27" width="4" height="1" fill="#22d3ee"/>
+  <rect x="47" y="22" width="3" height="4" fill="#4338ca"/>
+  <rect x="48" y="20" width="1" height="2" fill="#fcd34d"/>
+  <rect x="0" y="31" width="72" height="1" fill="#1a1530"/>
+</svg>
+""".strip()
+
 
 def get_global_css() -> str:
     return """
@@ -379,6 +411,54 @@ def get_global_css() -> str:
     margin-top: 1.25rem;
     animation: hq-fade-up 1s ease-out 0.55s both;
   }
+
+  /* Pixel vignette + micro-story (welcome landing) */
+  .hq-pixel-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    justify-content: center;
+    gap: 1.35rem 1.75rem;
+    margin: 1.65rem 0 0.25rem;
+    padding: 1.15rem 0.35rem 1.35rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.09);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .hq-pixel-frame {
+    flex: 0 0 auto;
+    align-self: center;
+    padding: 10px 12px 12px;
+    background: rgba(0, 0, 0, 0.42);
+    border: 2px solid rgba(168, 85, 247, 0.5);
+    border-radius: 10px;
+    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.05), 0 14px 36px rgba(0, 0, 0, 0.4);
+  }
+  .hq-pixel-frame svg {
+    display: block;
+    width: min(300px, 78vw);
+    height: auto;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  .hq-pixel-tale {
+    flex: 1 1 220px;
+    max-width: 26rem;
+    text-align: left;
+    align-self: center;
+  }
+  .hq-pixel-line {
+    font-family: 'DM Mono', ui-monospace, monospace !important;
+    font-size: 0.74rem;
+    line-height: 1.72;
+    color: #ddd6fe !important;
+    margin: 0 0 0.5rem 0;
+    opacity: 0;
+    animation: hq-fade-up 0.75s ease-out forwards;
+  }
+  .hq-pixel-line:nth-child(1) { animation-delay: 0.2s; }
+  .hq-pixel-line:nth-child(2) { animation-delay: 0.55s; }
+  .hq-pixel-line:nth-child(3) { animation-delay: 0.9s; }
+  .hq-pixel-line strong { color: #f5f3ff !important; font-weight: 600; }
 </style>
 """
 
@@ -400,8 +480,22 @@ def render_client_welcome(brand: str) -> str:
           Your live hiring-intent workspace is warming up in the background — job boards, scoring,
           and pipeline context — so when you step in, the first rows are already in motion.
         </p>
+        <div class="hq-pixel-panel">
+          <div class="hq-pixel-frame">{_WELCOME_PIXEL_SVG}</div>
+          <div class="hq-pixel-tale">
+            <p class="hq-pixel-line">
+              <strong>02:14</strong> — Another sales role hits the wire. The city pretends to sleep.
+            </p>
+            <p class="hq-pixel-line">
+              Miles away, a stack blinks: signals stack, tiers settle, someone worth the ping appears.
+            </p>
+            <p class="hq-pixel-line">
+              <strong>{safe}</strong> is the quiet layer that turns that noise into a room you can own.
+            </p>
+          </div>
+        </div>
         <p class="hq-welcome-foot">
-          Take a moment to review the story above, then enter the command center when you are ready.
+          Enjoy the vignette while data loads — then step into the command center when you are ready.
         </p>
       </div>
     </div>
