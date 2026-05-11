@@ -256,7 +256,7 @@ def _ensure_intent():
             )
             stream_table_slot.dataframe(
                 live_df.head(120),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -329,7 +329,7 @@ with st.sidebar:
         st.session_state.outreach_simulated = False
         st.session_state.step = 0
 
-    st.button("Apply session + reload from NocoDB", on_click=_apply_session, use_container_width=True)
+    st.button("Apply session + reload from NocoDB", on_click=_apply_session, width="stretch")
 
     st.text_input("Destination email (optional)", placeholder="you@company.com", key="test_email_in")
     st.slider(
@@ -347,14 +347,14 @@ with st.sidebar:
         f"Country priority target: ~{int(round(CORPUS_CA_JOB_SHARE * 100))}% Canada / {int(round(CORPUS_US_JOB_SHARE * 100))}% US."
     )
 
-    if st.button("Save pipeline to NocoDB", use_container_width=True):
+    if st.button("Save pipeline to NocoDB", width="stretch"):
         try:
             _save_to_nocodb()
             st.success("Saved snapshot to NocoDB.")
         except NocoDBError as exc:
             st.error(str(exc))
 
-    if st.button("Reset pipeline", use_container_width=True):
+    if st.button("Reset pipeline", width="stretch"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.session_state.step = 0
@@ -396,7 +396,7 @@ if st.session_state.step == 0:
             + glass_card_end(),
             unsafe_allow_html=True,
         )
-        st.dataframe(jobs if jobs is not None and not jobs.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+        st.dataframe(jobs if jobs is not None and not jobs.empty else pd.DataFrame(), width="stretch", hide_index=True)
         st.caption(
             f"Jobs fetched this run: {len(jobs) if isinstance(jobs, pd.DataFrame) else 0}"
         )
@@ -414,15 +414,15 @@ if st.session_state.step == 0:
             + glass_card_end(),
             unsafe_allow_html=True,
         )
-        st.dataframe(scored if scored is not None and not scored.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+        st.dataframe(scored if scored is not None and not scored.empty else pd.DataFrame(), width="stretch", hide_index=True)
     c1, c2 = st.columns([1, 2])
     with c1:
-        st.button("Back", disabled=True, use_container_width=True)
+        st.button("Back", disabled=True, width="stretch")
     with c2:
-        if st.button("Continue to scoring →", type="primary", use_container_width=True):
+        if st.button("Continue to scoring →", type="primary", width="stretch"):
             st.session_state.step = 1
             st.rerun()
-    if st.button("Regenerate intent corpus (OpenRouter)", use_container_width=True):
+    if st.button("Regenerate intent corpus (OpenRouter)", width="stretch"):
         invalidate_intent_corpus_cache()
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
@@ -448,7 +448,7 @@ elif st.session_state.step == 1:
     if scored is None or scored.empty:
         st.warning("No companies in intent pipeline.")
     else:
-        st.dataframe(scored, use_container_width=True, hide_index=True)
+        st.dataframe(scored, width="stretch", hide_index=True)
     ready = filter_outreach_ready(scored) if scored is not None and not scored.empty else pd.DataFrame()
     if (not min_tier) and ready is not None and not ready.empty:
         ready = pd.DataFrame()
@@ -462,9 +462,9 @@ elif st.session_state.step == 1:
     st.session_state._ready_for_enrich = ready
     c1, c2 = st.columns(2)
     with c1:
-        st.button("← Back", on_click=prev_step, use_container_width=True)
+        st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
-        if st.button("Run enrichment →", type="primary", use_container_width=True):
+        if st.button("Run enrichment →", type="primary", width="stretch"):
             st.session_state.step = 2
             st.rerun()
 
@@ -481,7 +481,7 @@ elif st.session_state.step == 2:
     ready = st.session_state.get("_ready_for_enrich", pd.DataFrame())
     st.markdown("<div class='hq-glass'>", unsafe_allow_html=True)
     if st.session_state.leads_enriched is None:
-        if st.button("Execute enrichment", type="primary", use_container_width=True):
+        if st.button("Execute enrichment", type="primary", width="stretch"):
             bar = st.progress(0)
             for i in range(100):
                 time.sleep(0.006)
@@ -496,19 +496,19 @@ elif st.session_state.step == 2:
             st.rerun()
     else:
         st.success("Contacts generated — ready for sequence drafting.")
-        st.dataframe(st.session_state.leads_enriched, use_container_width=True, hide_index=True)
-        if st.button("Generate smart role-based email suggestions", use_container_width=True):
+        st.dataframe(st.session_state.leads_enriched, width="stretch", hide_index=True)
+        if st.button("Generate smart role-based email suggestions", width="stretch"):
             st.session_state.role_suggestions = role_based_suggestions(st.session_state.leads_enriched)
         if st.session_state.role_suggestions is not None:
             st.markdown("**Smart personalization suggestions (by enriched role)**")
-            st.dataframe(st.session_state.role_suggestions, use_container_width=True, hide_index=True)
+            st.dataframe(st.session_state.role_suggestions, width="stretch", hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
     with c1:
-        st.button("← Back", on_click=prev_step, use_container_width=True)
+        st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
         if st.session_state.leads_enriched is not None and st.button(
-            "Push to CRM (queued) + Outreach →", type="primary", use_container_width=True
+            "Push to CRM (queued) + Outreach →", type="primary", width="stretch"
         ):
             le2 = st.session_state.leads_enriched
             assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
@@ -534,14 +534,14 @@ elif st.session_state.step == 3:
     le = st.session_state.leads_enriched
     if le is None or le.empty:
         st.warning("Complete enrichment first.")
-        st.button("← Back", on_click=prev_step, use_container_width=True)
+        st.button("← Back", on_click=prev_step, width="stretch")
     else:
         ib = InboxStatus(inbox_id="inbox-1", sent_today=st.session_state.emails_sent_count)
         st.markdown(
             f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability planning: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day.</div>",
             unsafe_allow_html=True,
         )
-        if st.button("Log outreach dispatch to NocoDB", type="primary", use_container_width=True) or st.session_state.outreach_simulated:
+        if st.button("Log outreach dispatch to NocoDB", type="primary", width="stretch") or st.session_state.outreach_simulated:
             st.session_state.outreach_simulated = True
             if st.session_state.emails_sent_count == 0 and st.session_state.walego_actions == 0:
                 if not st.session_state.crm_records:
@@ -614,9 +614,9 @@ elif st.session_state.step == 3:
             st.markdown("".join(blocks), unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1:
-            st.button("← Back", on_click=prev_step, use_container_width=True)
+            st.button("← Back", on_click=prev_step, width="stretch")
         with c2:
-            if st.button("Classify replies →", type="primary", use_container_width=True):
+            if st.button("Classify replies →", type="primary", width="stretch"):
                 st.session_state.replies_built = False
                 st.session_state.step = 4
                 st.rerun()
@@ -640,7 +640,7 @@ elif st.session_state.step == 4:
             height=160,
             key="replies_json_in",
         )
-        if st.button("Parse + classify replies", use_container_width=True):
+        if st.button("Parse + classify replies", width="stretch"):
             st.session_state.replies = []
             raw = (st.session_state.get("replies_json_in") or "").strip()
             try:
@@ -677,12 +677,12 @@ elif st.session_state.step == 4:
         st.markdown("**Inbox (structured)**", unsafe_allow_html=True)
         rdf = pd.DataFrame(st.session_state.replies)
         cols = [c for c in ("name", "text", "label", "email") if c in rdf.columns]
-        st.dataframe(rdf[cols], use_container_width=True, hide_index=True)
+        st.dataframe(rdf[cols], width="stretch", hide_index=True)
     c1, c2 = st.columns(2)
     with c1:
-        st.button("← Back", on_click=prev_step, use_container_width=True)
+        st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
-        if st.button("Sync CRM state →", type="primary", use_container_width=True):
+        if st.button("Sync CRM state →", type="primary", width="stretch"):
             st.session_state.step = 5
             st.rerun()
 
@@ -708,12 +708,12 @@ elif st.session_state.step == 5:
             append_event("crm_records", {"records": recs})
         except NocoDBError as exc:
             st.warning(f"Could not log CRM batch to NocoDB events table: {exc}")
-    st.dataframe(to_crm_dataframe(recs), use_container_width=True, hide_index=True)
+    st.dataframe(to_crm_dataframe(recs), width="stretch", hide_index=True)
     c1, c2 = st.columns(2)
     with c1:
-        st.button("← Back", on_click=prev_step, use_container_width=True)
+        st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
-        if st.button("View dashboard →", type="primary", use_container_width=True):
+        if st.button("View dashboard →", type="primary", width="stretch"):
             st.session_state.step = 6
             st.rerun()
 
@@ -805,4 +805,4 @@ else:
         ),
         unsafe_allow_html=True,
     )
-    st.button("← Back to CRM", on_click=prev_step, use_container_width=True)
+    st.button("← Back to CRM", on_click=prev_step, width="stretch")

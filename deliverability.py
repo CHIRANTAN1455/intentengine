@@ -2,21 +2,31 @@
 Deliverability layer: domain/inbox capacity (V1: checks + config).
 If warm-up/SPF/DKIM are not healthy, outbound should pause.
 """
-from __future__ import annotations
-
-from dataclasses import dataclass
 
 from config import MAX_EMAILS_PER_INBOX_PER_DAY, MIN_EMAILS_PER_INBOX_PER_DAY
 
 
-@dataclass
 class InboxStatus:
-    inbox_id: str
-    sent_today: int
-    max_per_day: int = MAX_EMAILS_PER_INBOX_PER_DAY
-    spf_ok: bool = True
-    dkim_ok: bool = True
-    warmup_healthy: bool = True
+    """Plain class (not @dataclass) to avoid Streamlit/hosted import edge cases with dataclasses."""
+
+    __slots__ = ("inbox_id", "sent_today", "max_per_day", "spf_ok", "dkim_ok", "warmup_healthy")
+
+    def __init__(
+        self,
+        inbox_id: str,
+        sent_today: int,
+        *,
+        max_per_day: int = MAX_EMAILS_PER_INBOX_PER_DAY,
+        spf_ok: bool = True,
+        dkim_ok: bool = True,
+        warmup_healthy: bool = True,
+    ) -> None:
+        self.inbox_id = inbox_id
+        self.sent_today = sent_today
+        self.max_per_day = max_per_day
+        self.spf_ok = spf_ok
+        self.dkim_ok = dkim_ok
+        self.warmup_healthy = warmup_healthy
 
     @property
     def can_send(self) -> bool:

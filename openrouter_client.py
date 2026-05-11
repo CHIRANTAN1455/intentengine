@@ -1,10 +1,18 @@
-"""OpenRouter client utilities for content generation and classification."""
+"""OpenRouter client utilities for content generation and classification.
+
+Includes inlined LLM routing (OpenAI / Anthropic / OpenRouter) so Streamlit Cloud
+does not depend on a separate top-level ``llm_client`` import (avoids KeyError
+there in some hosted runtimes).
+"""
 
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, timedelta
 from typing import Any
+
+import requests
 
 from config import (
     CORPUS_CA_JOB_SHARE,
@@ -12,9 +20,237 @@ from config import (
     INTENT_CORPUS_MAX_JOBS,
     INTENT_CORPUS_MIN_JOBS,
     MAX_JOB_POSTING_AGE_DAYS,
+    _lookup_str,
+    _read_optional_env,
+    get_openrouter_settings,
 )
 
-from llm_client import LLMError, chat_completion as _llm_chat_completion
+
+class LLMError(RuntimeError):
+    """All configured LLM providers failed."""
+
+
+_RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def _llm_timeout_seconds(task: str) -> int:
+    if task == "corpus":
+        raw = _read_optional_env("LLM_CORPUS_TIMEOUT_SECONDS", "180")
+    else:
+        raw = _read_optional_env("OPENROUTER_TIMEOUT_SECONDS", "25")
+    try:
+        return max(10, int(raw))
+    except ValueError:
+        return 180 if task == "corpus" else 25
+
+
+def _llm_provider_order() -> list[str]:
+    raw = _read_optional_env("LLM_PROVIDER_ORDER", "openrouter")
+    aliases = {"chatgpt": "openai", "gpt": "openai", "claude": "anthropic"}
+    out: list[str] = []
+    for part in raw.split(","):
+        p = part.strip().lower()
+        if not p:
+            continue
+        out.append(aliases.get(p, p))
+    return out or ["openrouter"]
+
+
+def _llm_post_json(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    label: str,
+    *,
+    timeout: int,
+) -> dict[str, Any]:
+    attempts = 3
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=max(10, timeout))
+            if response.status_code >= 400:
+                body_preview = (response.text or "")[:300]
+                err = f"{label} HTTP {response.status_code}: {body_preview}"
+                if response.status_code in _RETRYABLE and attempt < attempts:
+                    last_err = err
+                    time.sleep(0.8 * attempt)
+                    continue
+                raise LLMError(err)
+            return response.json()
+        except LLMError:
+            raise
+        except Exception as exc:
+            last_err = f"{label}: {exc}"
+            if attempt == attempts:
+                break
+            time.sleep(0.8 * attempt)
+    raise LLMError(f"{label} failed after retries: {last_err}")
+
+
+def _openai_corpus_max_tokens() -> int:
+    raw = _read_optional_env("OPENAI_CORPUS_MAX_TOKENS", "16384") or "16384"
+    try:
+        return max(4096, int(raw))
+    except ValueError:
+        return 16384
+
+
+def _openai_provider_chat(messages: list[dict[str, str]], temperature: float, task: str) -> str:
+    key = _lookup_str("OPENAI_API_KEY")
+    if not key:
+        raise LLMError("openai: OPENAI_API_KEY not set")
+    if task == "corpus":
+        model = _read_optional_env("OPENAI_CORPUS_MODEL", "gpt-4o")
+    else:
+        model = _read_optional_env("OPENAI_MODEL", "gpt-4o-mini")
+    base = _read_optional_env("OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions")
+    payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
+    if task == "corpus":
+        payload["max_tokens"] = _openai_corpus_max_tokens()
+    body = _llm_post_json(
+        base,
+        {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        payload,
+        "openai",
+        timeout=_llm_timeout_seconds(task),
+    )
+    content = (
+        body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    ).strip()
+    if not content:
+        raise LLMError("openai: empty content")
+    return content
+
+
+def _anthropic_max_tokens(task: str) -> int:
+    if task == "corpus":
+        raw = _read_optional_env("ANTHROPIC_CORPUS_MAX_TOKENS", "16384") or "16384"
+        try:
+            return max(4096, int(raw))
+        except ValueError:
+            return 16384
+    raw = _read_optional_env("ANTHROPIC_MAX_TOKENS", "4096") or "4096"
+    try:
+        return max(256, int(raw))
+    except ValueError:
+        return 4096
+
+
+def _anthropic_split_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
+    system_parts: list[str] = []
+    out: list[dict[str, str]] = []
+    for m in messages:
+        role = str(m.get("role") or "user").strip()
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+        elif role in ("user", "assistant"):
+            out.append({"role": role, "content": content})
+        else:
+            out.append({"role": "user", "content": content})
+    return "\n\n".join(system_parts), out
+
+
+def _anthropic_provider_chat(messages: list[dict[str, str]], temperature: float, task: str) -> str:
+    key = _lookup_str("ANTHROPIC_API_KEY")
+    if not key:
+        raise LLMError("anthropic: ANTHROPIC_API_KEY not set")
+    if task == "corpus":
+        model = _read_optional_env("ANTHROPIC_CORPUS_MODEL", "claude-3-5-sonnet-20241022")
+    else:
+        model = _read_optional_env("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+    system, msgs = _anthropic_split_messages(messages)
+    if not msgs:
+        raise LLMError("anthropic: no user/assistant messages")
+    url = _read_optional_env("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1/messages")
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": _anthropic_max_tokens(task),
+        "messages": msgs,
+        "temperature": temperature,
+    }
+    if system:
+        payload["system"] = system
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": _read_optional_env("ANTHROPIC_API_VERSION", "2023-06-01"),
+        "Content-Type": "application/json",
+    }
+    body = _llm_post_json(url, headers, payload, "anthropic", timeout=_llm_timeout_seconds(task))
+    blocks = body.get("content") or []
+    texts: list[str] = []
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "text":
+            texts.append(str(b.get("text") or ""))
+    content = "\n".join(t for t in texts if t).strip()
+    if not content:
+        raise LLMError("anthropic: empty content")
+    return content
+
+
+def _openrouter_corpus_max_tokens() -> int:
+    raw = _read_optional_env("OPENROUTER_CORPUS_MAX_TOKENS", "16384") or "16384"
+    try:
+        return max(4096, int(raw))
+    except ValueError:
+        return 16384
+
+
+def _openrouter_provider_chat(messages: list[dict[str, str]], temperature: float, task: str) -> str:
+    if not _lookup_str("OPENROUTER_API_KEY"):
+        raise LLMError("openrouter: OPENROUTER_API_KEY not set")
+    settings = get_openrouter_settings()
+    model = settings.model
+    if task == "corpus":
+        override = _read_optional_env("OPENROUTER_CORPUS_MODEL", "")
+        if override:
+            model = override
+    payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
+    if task == "corpus":
+        payload["max_tokens"] = _openrouter_corpus_max_tokens()
+    body = _llm_post_json(
+        settings.base_url,
+        {
+            "Authorization": f"Bearer {settings.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": settings.http_referer,
+            "X-Title": settings.app_title,
+        },
+        payload,
+        "openrouter",
+        timeout=_llm_timeout_seconds(task),
+    )
+    content = (
+        body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    ).strip()
+    if not content:
+        raise LLMError("openrouter: empty content")
+    return content
+
+
+def chat_completion(
+    messages: list[dict[str, str]],
+    temperature: float,
+    *,
+    task: str = "default",
+) -> str:
+    errors: list[str] = []
+    for provider in _llm_provider_order():
+        try:
+            if provider == "openai":
+                return _openai_provider_chat(messages, temperature, task)
+            if provider == "anthropic":
+                return _anthropic_provider_chat(messages, temperature, task)
+            if provider == "openrouter":
+                return _openrouter_provider_chat(messages, temperature, task)
+            errors.append(f"unknown provider: {provider}")
+        except LLMError as exc:
+            errors.append(str(exc))
+            continue
+    raise LLMError(" | ".join(errors) if errors else "no LLM providers configured")
 
 
 class OpenRouterError(RuntimeError):
@@ -23,7 +259,7 @@ class OpenRouterError(RuntimeError):
 
 def _chat_completion(messages: list[dict[str, str]], temperature: float) -> str:
     try:
-        return _llm_chat_completion(messages, temperature, task="default")
+        return chat_completion(messages, temperature, task="default")
     except LLMError as exc:
         raise OpenRouterError(str(exc)) from exc
 
@@ -31,7 +267,7 @@ def _chat_completion(messages: list[dict[str, str]], temperature: float) -> str:
 def _chat_completion_corpus(messages: list[dict[str, str]], temperature: float) -> str:
     """Large JSON intent corpus: uses task=corpus (stronger models, higher max tokens, longer timeout)."""
     try:
-        return _llm_chat_completion(messages, temperature, task="corpus")
+        return chat_completion(messages, temperature, task="corpus")
     except LLMError as exc:
         raise OpenRouterError(str(exc)) from exc
 
