@@ -51,6 +51,9 @@ MAX_JOB_POSTING_AGE_DAYS = 60
 
 # Synthetic corpus: target share of US + Canada listings (rest may be international)
 CORPUS_NA_JOB_SHARE = 0.95
+# Intent corpus size target per fetch (long list for realistic table ops)
+INTENT_CORPUS_MIN_JOBS = 70
+INTENT_CORPUS_MAX_JOBS = 90
 
 # Intent tiers
 TIER_HIGH = "High"

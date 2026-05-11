@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from config import CORPUS_NA_JOB_SHARE, SALES_ROLE_KEYWORDS
+from config import CORPUS_NA_JOB_SHARE, INTENT_CORPUS_MIN_JOBS, SALES_ROLE_KEYWORDS
 from openrouter_client import OpenRouterError, generate_intent_corpus_with_openrouter
 
 # Per–geo-hint cache (15 min) so different viewers do not share the wrong region.
@@ -26,6 +26,34 @@ def _corpus_cache_key(geo_hint: dict[str, Any] | None) -> str:
     return f"{str(geo_hint.get('countryCode') or '')}|{str(geo_hint.get('city') or '')}"
 
 
+def _merge_corpora(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    jobs = list(base.get("jobs", []) or [])
+    seen_keys = {
+        (
+            str(x.get("companyName") or x.get("company") or "").strip().lower(),
+            str(x.get("title") or x.get("role") or "").strip().lower(),
+            str(x.get("postedAt") or x.get("datePosted") or "").strip(),
+        )
+        for x in jobs
+        if isinstance(x, dict)
+    }
+    for item in list(incoming.get("jobs", []) or []):
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("companyName") or item.get("company") or "").strip().lower(),
+            str(item.get("title") or item.get("role") or "").strip().lower(),
+            str(item.get("postedAt") or item.get("datePosted") or "").strip(),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        jobs.append(item)
+
+    social = list(base.get("social", []) or []) + list(incoming.get("social", []) or [])
+    return {"jobs": jobs, "social": social}
+
+
 def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     global _CORPUS_CACHE
     now = time.time()
@@ -33,10 +61,17 @@ def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     entry = _CORPUS_CACHE.get(key)
     if entry and now < entry[0]:
         return entry[1]
-    try:
-        corpus = generate_intent_corpus_with_openrouter(geo_hint=geo_hint)
-    except OpenRouterError:
-        corpus = {"jobs": [], "social": []}
+    corpus: dict[str, Any] = {"jobs": [], "social": []}
+    for _ in range(3):
+        try:
+            chunk = generate_intent_corpus_with_openrouter(geo_hint=geo_hint)
+            corpus = _merge_corpora(corpus, chunk)
+            if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
+                break
+        except OpenRouterError:
+            if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
+                break
+            continue
     _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
     return corpus
 

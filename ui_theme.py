@@ -217,6 +217,61 @@ def get_global_css() -> str:
 
   [data-testid="stProgress"] > div { background: rgba(255,255,255,0.08) !important; border-radius: 999px; }
   [data-testid="stProgress"] [role="progressbar"] { background: linear-gradient(90deg, #6d28d9, #a855f7, #22d3ee) !important; border-radius: 999px; }
+
+  .hq-loader {
+    position: relative;
+    border: 1px solid var(--hq-border);
+    border-radius: 20px;
+    padding: 1.2rem 1.2rem;
+    background: linear-gradient(165deg, rgba(124,58,237,0.14) 0%, rgba(34,211,238,0.06) 100%);
+    overflow: hidden;
+    margin: 0.4rem 0 0.8rem;
+  }
+  .hq-loader:before {
+    content: "";
+    position: absolute;
+    inset: -30% auto auto -35%;
+    width: 70%;
+    height: 190%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.11), transparent);
+    transform: rotate(12deg);
+    animation: hq-sweep 2.2s linear infinite;
+    pointer-events: none;
+  }
+  .hq-loader h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.92rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: #ddd6fe !important;
+  }
+  .hq-loader p {
+    margin: 0 0 0.75rem;
+    color: #d4d4d8 !important;
+    font-size: 0.93rem;
+  }
+  .hq-loader-rail {
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.11);
+    overflow: hidden;
+  }
+  .hq-loader-bar {
+    width: 45%;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #6d28d9, #a855f7, #22d3ee);
+    animation: hq-pulse 1.3s ease-in-out infinite;
+    box-shadow: 0 0 18px rgba(168,85,247,0.45);
+  }
+  @keyframes hq-sweep {
+    0% { left: -40%; }
+    100% { left: 120%; }
+  }
+  @keyframes hq-pulse {
+    0%, 100% { transform: translateX(0%); width: 38%; }
+    50% { transform: translateX(130%); width: 52%; }
+  }
 </style>
 """
 
@@ -293,3 +348,13 @@ def render_stat_grid(sections: list[tuple[str, list[tuple[str, str]]]]) -> str:
             parts.append(f'<div class="hq-stat"><div class="v">{val}</div><div class="k">{key}</div></div>')
         parts.append("</div>")
     return "".join(parts)
+
+
+def render_loader(title: str, subtitle: str) -> str:
+    return f"""
+    <div class="hq-loader">
+      <h3>{title}</h3>
+      <p>{subtitle}</p>
+      <div class="hq-loader-rail"><div class="hq-loader-bar"></div></div>
+    </div>
+    """

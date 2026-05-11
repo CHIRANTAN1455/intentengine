@@ -9,7 +9,13 @@ from typing import Any
 
 import requests
 
-from config import CORPUS_NA_JOB_SHARE, MAX_JOB_POSTING_AGE_DAYS, get_openrouter_settings
+from config import (
+    CORPUS_NA_JOB_SHARE,
+    INTENT_CORPUS_MAX_JOBS,
+    INTENT_CORPUS_MIN_JOBS,
+    MAX_JOB_POSTING_AGE_DAYS,
+    get_openrouter_settings,
+)
 
 
 class OpenRouterError(RuntimeError):
@@ -225,8 +231,8 @@ def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = Non
         "  ]\n"
         "}\n"
         "Constraints:\n"
-        "- Provide 8-12 jobs across 4-6 companies.\n"
-        "- Provide 6-10 social rows across overlapping companies.\n"
+        f"- Provide {INTENT_CORPUS_MIN_JOBS}-{INTENT_CORPUS_MAX_JOBS} jobs across 18-30 companies.\n"
+        "- Provide 30-60 social rows across overlapping companies.\n"
         "- Titles must include sales roles (SDR, BDR, AE, Account Executive, Sales Rep).\n"
         "- Keep URLs plausible but fictional.\n"
         f"- Every postedAt must be on or after { (date.today() - timedelta(days=MAX_JOB_POSTING_AGE_DAYS)).isoformat() } "

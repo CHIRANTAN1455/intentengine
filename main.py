@@ -38,6 +38,7 @@ from ui_theme import (
     glass_card_end,
     glass_card_start,
     render_hero,
+    render_loader,
     render_stat_grid,
     render_stepper,
     section_header,
@@ -237,7 +238,15 @@ def _ensure_intent():
         or cached_geo != geo_key
     ):
         try:
-            jobs, scored = run_intent_stage(max_job_age_days=max_age, geo_hint=geo_hint)
+            st.markdown(
+                render_loader(
+                    "Building intent corpus",
+                    "Generating a high-volume job feed (70+ rows), applying geo weighting, and scoring company intent.",
+                ),
+                unsafe_allow_html=True,
+            )
+            with st.spinner("Generating intent corpus and scoring companies..."):
+                jobs, scored = run_intent_stage(max_job_age_days=max_age, geo_hint=geo_hint)
             st.session_state.company_jobs = jobs
             st.session_state.company_scored = scored
             st.session_state._intent_max_age_applied = max_age
@@ -353,6 +362,9 @@ if st.session_state.step == 0:
             unsafe_allow_html=True,
         )
         st.dataframe(jobs if jobs is not None and not jobs.empty else pd.DataFrame(), use_container_width=True, hide_index=True)
+        st.caption(
+            f"Jobs fetched this run: {len(jobs) if isinstance(jobs, pd.DataFrame) else 0}"
+        )
     with d2:
         st.markdown(
             glass_card_start("Company intelligence")
@@ -372,6 +384,13 @@ if st.session_state.step == 0:
         invalidate_intent_corpus_cache()
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
+        st.markdown(
+            render_loader(
+                "Refreshing intent data",
+                "Fetching a new large batch, applying US/CA + IP regional mix, and preparing fresh scoring tables.",
+            ),
+            unsafe_allow_html=True,
+        )
         _ensure_intent()
         st.rerun()
 
