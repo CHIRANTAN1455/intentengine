@@ -293,7 +293,7 @@ with st.sidebar:
         """
         <div style="padding:0.1rem 0 0.9rem;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:1rem;">
         <span style="font-size:0.62rem;letter-spacing:0.22em;text-transform:uppercase;color:#a78bfa;">Session</span><br/>
-        <span style="font-size:1.15rem;font-weight:700;background:linear-gradient(90deg,#fff,#c4b5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">HireQuity</span>
+        <span style="font-size:1.15rem;font-weight:700;background:linear-gradient(90deg,#fff,#c4b5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">hirequity</span>
         <p style="margin:0.35rem 0 0;font-size:0.78rem;color:#71717a !important;">In-house · OpenRouter + NocoDB</p>
         </div>
         """,

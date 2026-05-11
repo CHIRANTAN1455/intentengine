@@ -1,5 +1,5 @@
 """
-Email engine (primary): max 2–3 touches; HireQuity rep tone; hiring + company context.
+Email engine (primary): max 2–3 touches; hirequity rep tone; hiring + company context.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _first_name(name: str) -> str:
 
 
 def build_email_sequence(lead: pd.Series, max_emails: Optional[int] = None) -> List[Dict[str, str]]:
-    """Return list of {step, subject, body} in HireQuity voice."""
+    """Return list of {step, subject, body} in hirequity voice."""
     n = max_emails or MAX_EMAILS_PER_LEAD
     n = min(max(1, n), MAX_EMAILS_PER_LEAD)
     name = str(lead.get("Name", "there"))
@@ -70,7 +70,7 @@ def build_email_sequence(lead: pd.Series, max_emails: Optional[int] = None) -> L
             f"Hi {fn},\n\n"
             f"Following up — happy to share 2-3 similar placements we made for teams hiring SDRs/AEs. "
             f"If timing is off, a one-line \"not now\" works.\n\n"
-            f"— HireQuity"
+            f"— hirequity"
         ),
     }
     e3 = {
@@ -80,7 +80,7 @@ def build_email_sequence(lead: pd.Series, max_emails: Optional[int] = None) -> L
             f"Hi {fn},\n\n"
             f"Last ping from me. If building the sales bench is a priority, I can send a one-pager. "
             f"Otherwise I'll close the thread.\n\n"
-            f"— HireQuity"
+            f"— hirequity"
         ),
     }
     seq = [e1, e2, e3][:n]

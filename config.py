@@ -28,7 +28,7 @@ def _lookup_str(name: str, default: str | None = None) -> str | None:
     return default
 
 
-BRAND = "HireQuity"
+BRAND = "hirequity"
 PRODUCT = "Intent Outbound Engine"
 
 # Job boards we aggregate (V1: mock or adapter pluggable; real scrapers go behind these flags)

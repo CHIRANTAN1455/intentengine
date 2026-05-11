@@ -1,7 +1,7 @@
-"""Premium visual system for HireQuity (Streamlit-injected CSS)."""
+"""Premium visual system for hirequity (Streamlit-injected CSS)."""
 from __future__ import annotations
 
-BRAND = "HireQuity"
+BRAND = "hirequity"
 
 
 def get_global_css() -> str:
