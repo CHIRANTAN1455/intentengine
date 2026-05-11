@@ -6,7 +6,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config import TIER_HIGH, TIER_MEDIUM, TIER_LOW
+from config import (
+    HIGH_INTENT_MAX_AGE_DAYS,
+    MEDIUM_INTENT_MAX_AGE_DAYS,
+    TIER_HIGH,
+    TIER_LOW,
+    TIER_MEDIUM,
+)
 
 
 def _base_score_from_company_row(row) -> float:
@@ -23,10 +29,10 @@ def _base_score_from_company_row(row) -> float:
     return min(score, 100.0)
 
 
-def assign_tier(score: float) -> str:
-    if score >= 75:
+def _tier_from_oldest_age(oldest_days: float) -> str:
+    if oldest_days <= float(HIGH_INTENT_MAX_AGE_DAYS):
         return TIER_HIGH
-    if score >= 55:
+    if oldest_days <= float(MEDIUM_INTENT_MAX_AGE_DAYS):
         return TIER_MEDIUM
     return TIER_LOW
 
@@ -36,7 +42,11 @@ def score_companies(company_df: pd.DataFrame) -> pd.DataFrame:
         return company_df
     out = company_df.copy()
     out["Intent score"] = out.apply(_base_score_from_company_row, axis=1)
-    out["Intent tier"] = out["Intent score"].map(assign_tier)
+    if "Oldest posting (days)" in out.columns:
+        oldest = pd.to_numeric(out["Oldest posting (days)"], errors="coerce").fillna(MEDIUM_INTENT_MAX_AGE_DAYS + 1)
+        out["Intent tier"] = oldest.map(_tier_from_oldest_age)
+    else:
+        out["Intent tier"] = TIER_LOW
     return out
 
 

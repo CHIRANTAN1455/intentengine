@@ -1,4 +1,4 @@
-"""In-house intent ingestion powered by OpenRouter structured generation."""
+"""Intent ingestion: live job boards first, OpenRouter fallback."""
 
 from __future__ import annotations
 
@@ -9,7 +9,14 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from config import CORPUS_NA_JOB_SHARE, INTENT_CORPUS_MIN_JOBS, SALES_ROLE_KEYWORDS
+from config import (
+    CORPUS_CA_JOB_SHARE,
+    CORPUS_US_JOB_SHARE,
+    INTENT_CORPUS_MIN_JOBS,
+    LIVE_JOB_SITES,
+    MAX_JOB_POSTING_AGE_DAYS,
+    SALES_ROLE_KEYWORDS,
+)
 from openrouter_client import OpenRouterError, generate_intent_corpus_with_openrouter
 
 # Per–geo-hint cache (15 min) so different viewers do not share the wrong region.
@@ -57,6 +64,163 @@ def _merge_corpora(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, 
     return {"jobs": jobs, "social": social}
 
 
+def _derive_social_from_jobs(raw_jobs: list[dict[str, Any]]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for j in raw_jobs:
+        company = str(j.get("companyName") or "").strip()
+        role = str(j.get("title") or "").strip()
+        if not company or company in seen:
+            continue
+        seen.add(company)
+        out.append(
+            {
+                "companyName": company,
+                "text": f"{company} is actively hiring for sales role(s) such as {role}.",
+                "source": "live_job_boards",
+            }
+        )
+    return out
+
+
+def _to_iso_date(v: Any) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return (date.today() - timedelta(days=7)).isoformat()
+    try:
+        ts = pd.to_datetime(v, errors="coerce")
+        if pd.isna(ts):
+            return (date.today() - timedelta(days=7)).isoformat()
+        return ts.date().isoformat()
+    except Exception:
+        return (date.today() - timedelta(days=7)).isoformat()
+
+
+def _country_targets() -> list[tuple[str, str, str, int]]:
+    """
+    Returns tuples: (country_code, country_indeed, location, target_rows)
+    """
+    total = max(INTENT_CORPUS_MIN_JOBS, 20)
+    ca_target = max(1, int(round(total * CORPUS_CA_JOB_SHARE)))
+    us_target = max(1, total - ca_target)
+    return [
+        ("CA", "canada", "Canada", ca_target),
+        ("US", "usa", "United States", us_target),
+    ]
+
+
+def _live_jobspy_corpus(
+    geo_hint: dict[str, Any] | None = None,
+    on_partial_jobs: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> dict[str, Any]:
+    """
+    Pull live jobs from boards via python-jobspy.
+    Falls back to empty lists if dependency or upstream scraping fails.
+    """
+    try:
+        from jobspy import scrape_jobs
+    except Exception:
+        return {"jobs": [], "social": []}
+
+    roles = [
+        "sales representative",
+        "account executive",
+        "sales development representative",
+        "business development representative",
+    ]
+    targets = _country_targets()
+    tasks: list[tuple[str, str, str, int]] = []
+    for cc, indeed_country, location, target in targets:
+        per_role = max(5, int(target / max(1, len(roles))))
+        for role in roles:
+            tasks.append((cc, indeed_country, location, per_role))
+
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    # inject role-specific search terms by rebuilding tasks with role in search term call
+    with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
+        futures = []
+        for cc, indeed_country, location, target in targets:
+            per_role = max(5, int(target / max(1, len(roles))))
+            for role in roles:
+                futures.append(
+                    ex.submit(
+                        lambda c=cc, ic=indeed_country, loc=location, wanted=per_role, r=role: _run_jobspy_query(
+                            c, ic, loc, wanted, r
+                        )
+                    )
+                )
+        for fut in as_completed(futures):
+            try:
+                batch = fut.result()
+            except Exception:
+                continue
+            if not batch:
+                continue
+            for row in batch:
+                company = str(row.get("companyName") or "").strip().lower()
+                title = str(row.get("title") or "").strip().lower()
+                url = str(row.get("url") or "").strip()
+                key = (company, title, url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(row)
+            if on_partial_jobs is not None:
+                on_partial_jobs(results.copy())
+            if len(results) >= INTENT_CORPUS_MIN_JOBS:
+                break
+
+    return {"jobs": results, "social": _derive_social_from_jobs(results)}
+
+
+def _run_jobspy_query(
+    country_code: str,
+    indeed_country: str,
+    location: str,
+    wanted: int,
+    role_query: str,
+) -> list[dict[str, Any]]:
+    try:
+        from jobspy import scrape_jobs
+    except Exception:
+        return []
+    try:
+        df = scrape_jobs(
+            site_name=list(LIVE_JOB_SITES),
+            search_term=role_query,
+            location=location,
+            results_wanted=wanted,
+            hours_old=24 * MAX_JOB_POSTING_AGE_DAYS,
+            country_indeed=indeed_country,
+            linkedin_fetch_description=False,
+        )
+    except Exception:
+        return []
+    if df is None or len(df) == 0:
+        return []
+    out_rows: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        company = str(row.get("company") or row.get("company_name") or "").strip()
+        title = str(row.get("title") or "").strip()
+        url = str(row.get("job_url") or row.get("url") or "").strip()
+        if not company or not title:
+            continue
+        if not _is_sales_role(title):
+            continue
+        out_rows.append(
+            {
+                "companyName": company,
+                "title": title,
+                "url": url,
+                "postedAt": _to_iso_date(row.get("date_posted")),
+                "countryCode": country_code,
+                "source": str(row.get("site") or "live_job_boards"),
+            }
+        )
+    return out_rows
+
+
 def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     global _CORPUS_CACHE
     now = time.time()
@@ -64,20 +228,23 @@ def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     entry = _CORPUS_CACHE.get(key)
     if entry and now < entry[0]:
         return entry[1]
-    corpus: dict[str, Any] = {"jobs": [], "social": []}
-    with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
-        futures = [
-            ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
-            for _ in range(_CORPUS_FETCH_ATTEMPTS)
-        ]
-        for fut in as_completed(futures):
-            try:
-                chunk = fut.result()
-            except OpenRouterError:
-                continue
-            corpus = _merge_corpora(corpus, chunk)
-            if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
-                break
+    corpus = _live_jobspy_corpus(geo_hint=geo_hint)
+    if len(list(corpus.get("jobs", []) or [])) < max(15, int(INTENT_CORPUS_MIN_JOBS * 0.35)):
+        # Fallback to synthetic only when live pull is unavailable/sparse.
+        corpus = {"jobs": [], "social": []}
+        with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
+            futures = [
+                ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
+                for _ in range(_CORPUS_FETCH_ATTEMPTS)
+            ]
+            for fut in as_completed(futures):
+                try:
+                    chunk = fut.result()
+                except OpenRouterError:
+                    continue
+                corpus = _merge_corpora(corpus, chunk)
+                if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
+                    break
     _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
     return corpus
 
@@ -116,38 +283,48 @@ def fetch_job_postings_stream(
     key = _corpus_cache_key(geo_hint)
     entry = _CORPUS_CACHE.get(key)
     if entry and now < entry[0]:
-        cached_jobs = _enforce_na_job_mix(list(entry[1].get("jobs", []) or []))
+        cached_jobs = _enforce_country_priority_mix(list(entry[1].get("jobs", []) or []))
         df = pd.DataFrame(_job_rows_from_raw_jobs(cached_jobs))
         if on_rows is not None:
             on_rows(df)
         return df
 
-    corpus: dict[str, Any] = {"jobs": [], "social": []}
-    with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
-        futures = [
-            ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
-            for _ in range(_CORPUS_FETCH_ATTEMPTS)
-        ]
-        for fut in as_completed(futures):
-            try:
-                chunk = fut.result()
-            except OpenRouterError:
-                continue
-            corpus = _merge_corpora(corpus, chunk)
-            partial_jobs = _enforce_na_job_mix(list(corpus.get("jobs", []) or []))
-            partial_df = pd.DataFrame(_job_rows_from_raw_jobs(partial_jobs))
-            if on_rows is not None:
-                on_rows(partial_df)
-            if len(partial_jobs) >= INTENT_CORPUS_MIN_JOBS:
-                break
+    def _on_partial(raw_jobs: list[dict[str, Any]]) -> None:
+        if on_rows is None:
+            return
+        partial_jobs = _enforce_country_priority_mix(raw_jobs)
+        partial_df = pd.DataFrame(_job_rows_from_raw_jobs(partial_jobs))
+        on_rows(partial_df)
+
+    corpus = _live_jobspy_corpus(geo_hint=geo_hint, on_partial_jobs=_on_partial)
+    if len(list(corpus.get("jobs", []) or [])) < max(15, int(INTENT_CORPUS_MIN_JOBS * 0.35)):
+        # keep streaming even in fallback mode
+        corpus = {"jobs": [], "social": []}
+        with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
+            futures = [
+                ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
+                for _ in range(_CORPUS_FETCH_ATTEMPTS)
+            ]
+            for fut in as_completed(futures):
+                try:
+                    chunk = fut.result()
+                except OpenRouterError:
+                    continue
+                corpus = _merge_corpora(corpus, chunk)
+                partial_jobs = _enforce_country_priority_mix(list(corpus.get("jobs", []) or []))
+                partial_df = pd.DataFrame(_job_rows_from_raw_jobs(partial_jobs))
+                if on_rows is not None:
+                    on_rows(partial_df)
+                if len(partial_jobs) >= INTENT_CORPUS_MIN_JOBS:
+                    break
 
     _CORPUS_CACHE[key] = (now + 15 * 60, corpus)
-    jobs = _enforce_na_job_mix(list(corpus.get("jobs", []) or []))
+    jobs = _enforce_country_priority_mix(list(corpus.get("jobs", []) or []))
     return pd.DataFrame(_job_rows_from_raw_jobs(jobs))
 
 
-def _enforce_na_job_mix(jobs: list[Any]) -> list[Any]:
-    """If countryCode is mostly present, trim non-US/CA rows to ~5% cap."""
+def _enforce_country_priority_mix(jobs: list[Any]) -> list[Any]:
+    """Prefer CA/US rows and rebalance toward configured CA/US split."""
     if not jobs:
         return jobs
     eligible = [j for j in jobs if isinstance(j, dict)]
@@ -156,21 +333,37 @@ def _enforce_na_job_mix(jobs: list[Any]) -> list[Any]:
     with_cc = sum(1 for j in eligible if str(j.get("countryCode") or "").strip())
     if with_cc < max(3, len(eligible) // 2):
         return jobs
-    na: list[dict[str, Any]] = []
+    ca: list[dict[str, Any]] = []
+    us: list[dict[str, Any]] = []
     other: list[dict[str, Any]] = []
     for j in eligible:
         cc = str(j.get("countryCode") or "").strip().upper()
-        if cc in ("US", "CA", ""):
-            na.append(j)
+        if cc == "CA":
+            ca.append(j)
+        elif cc in ("US", ""):
+            us.append(j)
         else:
             other.append(j)
-    n = len(eligible)
-    max_other = max(0, int(n * (1.0 - CORPUS_NA_JOB_SHARE) + 0.999))
-    if len(other) <= max_other:
-        return jobs
-    if not na:
-        return jobs
-    return na + other[:max_other]
+    total = len(eligible)
+    target_ca = int(round(total * CORPUS_CA_JOB_SHARE))
+    target_us = int(round(total * CORPUS_US_JOB_SHARE))
+
+    selected_ca = ca[:target_ca]
+    selected_us = us[:target_us]
+    out = selected_ca + selected_us
+    remainder = total - len(out)
+
+    if remainder > 0:
+        extra_ca = ca[target_ca:]
+        extra_us = us[target_us:]
+        out.extend(extra_ca[:remainder])
+        remainder = total - len(out)
+        if remainder > 0:
+            out.extend(extra_us[:remainder])
+            remainder = total - len(out)
+        if remainder > 0:
+            out.extend(other[:remainder])
+    return out[:total]
 
 
 def _is_sales_role(title: str) -> bool:
@@ -195,7 +388,7 @@ def _parse_posted_date(raw: str | None) -> date:
 def fetch_job_postings(geo_hint: dict[str, Any] | None = None) -> pd.DataFrame:
     corpus = _get_corpus(geo_hint)
     raw_jobs = list(corpus.get("jobs", []) or [])
-    raw_jobs = _enforce_na_job_mix(raw_jobs)
+    raw_jobs = _enforce_country_priority_mix(raw_jobs)
     return pd.DataFrame(_job_rows_from_raw_jobs(raw_jobs))
 
 

@@ -33,6 +33,7 @@ PRODUCT = "Intent Outbound Engine"
 
 # Job boards we aggregate (V1: mock or adapter pluggable; real scrapers go behind these flags)
 JOB_SOURCES = ("linkedin_jobs", "indeed", "glassdoor")
+LIVE_JOB_SITES = ("indeed", "linkedin")
 
 # Sales hiring roles to match
 SALES_ROLE_KEYWORDS = (
@@ -46,11 +47,16 @@ SALES_ROLE_KEYWORDS = (
     "outbound",
 )
 
-# Job postings: never older than this many days (~2 months) in pipeline or UI filter range
-MAX_JOB_POSTING_AGE_DAYS = 60
+# Job postings: cap oldest listing to 3 weeks in pipeline/UI
+MAX_JOB_POSTING_AGE_DAYS = 21
 
-# Synthetic corpus: target share of US + Canada listings (rest may be international)
-CORPUS_NA_JOB_SHARE = 0.95
+# Recency-based intent tiering
+HIGH_INTENT_MAX_AGE_DAYS = 7
+MEDIUM_INTENT_MAX_AGE_DAYS = 21
+
+# Synthetic corpus country priority mix
+CORPUS_CA_JOB_SHARE = 0.60
+CORPUS_US_JOB_SHARE = 0.40
 # Intent corpus size target per fetch (long list for realistic table ops)
 INTENT_CORPUS_MIN_JOBS = 70
 INTENT_CORPUS_MAX_JOBS = 90

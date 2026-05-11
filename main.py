@@ -7,7 +7,10 @@ import streamlit as st
 
 from config import (
     BRAND,
-    CORPUS_NA_JOB_SHARE,
+    CORPUS_CA_JOB_SHARE,
+    CORPUS_US_JOB_SHARE,
+    HIGH_INTENT_MAX_AGE_DAYS,
+    MEDIUM_INTENT_MAX_AGE_DAYS,
     MAX_EMAILS_PER_INBOX_PER_DAY,
     MAX_JOB_POSTING_AGE_DAYS,
     REPLY_INTERESTED,
@@ -261,7 +264,7 @@ def _ensure_intent():
             loader_slot.markdown(
                 render_loader(
                     "Building intent corpus",
-                    "Generating a high-volume job feed (70+ rows), applying geo weighting, and scoring company intent.",
+                    "Pulling live jobs from boards (Indeed/LinkedIn), applying country weighting, and scoring company intent.",
                 ),
                 unsafe_allow_html=True,
             )
@@ -330,14 +333,14 @@ with st.sidebar:
         min_value=1,
         max_value=MAX_JOB_POSTING_AGE_DAYS,
         key="max_job_age_days",
-        help=f"Listings older than this many days are dropped (hard cap {MAX_JOB_POSTING_AGE_DAYS} days ≈ 2 months).",
+        help=f"Listings older than this many days are dropped (hard cap {MAX_JOB_POSTING_AGE_DAYS} days ≈ 3 weeks).",
     )
     min_tier = st.multiselect("Outreach tiers", ["High", "Medium"], default=["High", "Medium"])
     vg = st.session_state.get("_viewer_geo")
     if isinstance(vg, dict) and vg.get("summary"):
         st.caption(vg["summary"])
     st.caption(
-        f"Job corpus targets ~{int(round(CORPUS_NA_JOB_SHARE * 100))}% US + Canada, biased to your connection where possible."
+        f"Country priority target: ~{int(round(CORPUS_CA_JOB_SHARE * 100))}% Canada / {int(round(CORPUS_US_JOB_SHARE * 100))}% US."
     )
 
     if st.button("Save pipeline to NocoDB", use_container_width=True):
@@ -373,9 +376,10 @@ if st.session_state.step == 0:
     st.markdown(
         section_header(
             "Intent engine",
-            "In-house corpus generation via OpenRouter (structured jobs + social signals), then scored like a real pipeline. "
+            "Live job-board ingestion (Indeed/LinkedIn) with model fallback, then scored like a real pipeline. "
             f"Job postings older than the sidebar “max age” (up to {MAX_JOB_POSTING_AGE_DAYS} days) are excluded. "
-            f"Listings target ~{int(round(CORPUS_NA_JOB_SHARE * 100))}% US + Canada, weighted toward your connection region when available.",
+            f"Tiering uses recency: High ≤ {HIGH_INTENT_MAX_AGE_DAYS} days, Medium ≤ {MEDIUM_INTENT_MAX_AGE_DAYS} days. "
+            f"Listings target ~{int(round(CORPUS_CA_JOB_SHARE * 100))}% Canada / {int(round(CORPUS_US_JOB_SHARE * 100))}% US.",
         ),
         unsafe_allow_html=True,
     )
@@ -384,7 +388,7 @@ if st.session_state.step == 0:
         st.markdown(
             glass_card_start("Job postings")
             + f"<p>Filtered: Sales Rep, AE, SDR, BDR, and related GTM roles. Posting age ≤ {int(st.session_state.get('max_job_age_days', MAX_JOB_POSTING_AGE_DAYS))} days (cap {MAX_JOB_POSTING_AGE_DAYS}d). "
-            + f"~{int(round(CORPUS_NA_JOB_SHARE * 100))}% US/CA by design.</p>"
+            + f"Country mix target: ~{int(round(CORPUS_CA_JOB_SHARE * 100))}% CA / {int(round(CORPUS_US_JOB_SHARE * 100))}% US.</p>"
             + glass_card_end(),
             unsafe_allow_html=True,
         )
@@ -414,7 +418,7 @@ if st.session_state.step == 0:
         st.markdown(
             render_loader(
                 "Refreshing intent data",
-                "Fetching a new large batch, applying US/CA + IP regional mix, and preparing fresh scoring tables.",
+                "Fetching fresh live listings from job boards and preparing updated scoring tables.",
             ),
             unsafe_allow_html=True,
         )
