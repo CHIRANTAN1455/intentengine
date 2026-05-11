@@ -185,16 +185,19 @@ def _run_jobspy_query(
         from jobspy import scrape_jobs
     except Exception:
         return []
+    kwargs: dict[str, Any] = {
+        "site_name": list(LIVE_JOB_SITES),
+        "search_term": role_query,
+        "location": location,
+        "results_wanted": max(wanted, 20),
+        "hours_old": 24 * MAX_JOB_POSTING_AGE_DAYS,
+        "country_indeed": indeed_country,
+    }
     try:
-        df = scrape_jobs(
-            site_name=list(LIVE_JOB_SITES),
-            search_term=role_query,
-            location=location,
-            results_wanted=wanted,
-            hours_old=24 * MAX_JOB_POSTING_AGE_DAYS,
-            country_indeed=indeed_country,
-            linkedin_fetch_description=False,
-        )
+        try:
+            df = scrape_jobs(**kwargs, linkedin_fetch_description=True)
+        except TypeError:
+            df = scrape_jobs(**kwargs)
     except Exception:
         return []
     if df is None or len(df) == 0:
@@ -208,6 +211,15 @@ def _run_jobspy_query(
             continue
         if not _is_sales_role(title):
             continue
+        desc = str(
+            row.get("description")
+            or row.get("job_description")
+            or row.get("summary")
+            or ""
+        ).strip()
+        if len(desc) > 4000:
+            desc = desc[:4000] + "…"
+        loc = str(row.get("location") or row.get("job_location") or "").strip()
         out_rows.append(
             {
                 "companyName": company,
@@ -216,6 +228,8 @@ def _run_jobspy_query(
                 "postedAt": _to_iso_date(row.get("date_posted")),
                 "countryCode": country_code,
                 "source": str(row.get("site") or "live_job_boards"),
+                "location": loc,
+                "listingSnippet": desc,
             }
         )
     return out_rows
@@ -258,16 +272,21 @@ def _job_rows_from_raw_jobs(raw_jobs: list[Any]) -> list[dict[str, Any]]:
         company = str(item.get("companyName") or item.get("company") or "").strip()
         if not company or not role or not _is_sales_role(role):
             continue
-        rows.append(
-            {
-                "Company": company,
-                "Role": role,
-                "Job URL": str(item.get("url") or item.get("jobUrl") or ""),
-                "Posting date": _parse_posted_date(item.get("postedAt") or item.get("datePosted")),
-                "Source": str(item.get("source") or "inhouse_openrouter"),
-                "Country code": str(item.get("countryCode") or "").strip().upper(),
-            }
-        )
+        row_out: dict[str, Any] = {
+            "Company": company,
+            "Role": role,
+            "Job URL": str(item.get("url") or item.get("jobUrl") or ""),
+            "Posting date": _parse_posted_date(item.get("postedAt") or item.get("datePosted")),
+            "Source": str(item.get("source") or "inhouse_openrouter"),
+            "Country code": str(item.get("countryCode") or "").strip().upper(),
+        }
+        loc = str(item.get("location") or "").strip()
+        if loc:
+            row_out["Location"] = loc[:500]
+        snip = str(item.get("listingSnippet") or item.get("description") or "").strip()
+        if snip:
+            row_out["Listing snippet"] = snip[:4000]
+        rows.append(row_out)
     return rows
 
 

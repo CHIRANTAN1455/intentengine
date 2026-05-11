@@ -23,7 +23,15 @@ class OpenRouterError(RuntimeError):
 
 def _chat_completion(messages: list[dict[str, str]], temperature: float) -> str:
     try:
-        return _llm_chat_completion(messages, temperature)
+        return _llm_chat_completion(messages, temperature, task="default")
+    except LLMError as exc:
+        raise OpenRouterError(str(exc)) from exc
+
+
+def _chat_completion_corpus(messages: list[dict[str, str]], temperature: float) -> str:
+    """Large JSON intent corpus: uses task=corpus (stronger models, higher max tokens, longer timeout)."""
+    try:
+        return _llm_chat_completion(messages, temperature, task="corpus")
     except LLMError as exc:
         raise OpenRouterError(str(exc)) from exc
 
@@ -160,7 +168,8 @@ def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
 
 def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     """
-    Generate synthetic-but-structured hiring intent data for the in-house pipeline.
+    Structured hiring intent data for the pipeline (LLM fallback when live boards are sparse).
+    Prefer real public job-board / ATS URLs and faithful listing detail—not placeholders.
     Returns JSON object: { "jobs": [...], "social": [...] }.
     """
     prompt = (
@@ -168,37 +177,50 @@ def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = Non
         "{\n"
         '  "jobs": [\n'
         "    {\n"
-        '      "companyName": "string",\n'
-        '      "title": "string (sales hiring role)",\n'
-        '      "url": "https://example.com/job/1",\n'
+        '      "companyName": "string (legal employer name)",\n'
+        '      "title": "string (sales hiring role: SDR, BDR, AE, etc.)",\n'
+        '      "url": "https://... real job posting URL",\n'
         '      "postedAt": "YYYY-MM-DD",\n'
-        '      "countryCode": "US",\n'
-        '      "source": "inhouse"\n'
+        '      "countryCode": "US" or "CA",\n'
+        '      "source": "linkedin|indeed|lever|greenhouse|ashby|workday|careers_site|other",\n'
+        '      "location": "City, Region (e.g. Toronto, ON or Austin, TX)",\n'
+        '      "listingSnippet": "string: 2-4 sentences mirroring the real posting summary (comp, scope, stack/motion if stated)"\n'
         "    }\n"
         "  ],\n"
         '  "social": [\n'
         "    {\n"
         '      "companyName": "string",\n'
-        '      "text": "string (mentions hiring sales / scaling outbound)",\n'
-        '      "source": "inhouse"\n'
+        '      "text": "string (hiring / GTM / outbound motion aligned with that company)",\n'
+        '      "source": "linkedin|twitter|news|other"\n'
         "    }\n"
         "  ]\n"
         "}\n"
-        "Constraints:\n"
-        f"- Provide {INTENT_CORPUS_MIN_JOBS}-{INTENT_CORPUS_MAX_JOBS} jobs across 18-30 companies.\n"
-        "- Provide 30-60 social rows across overlapping companies.\n"
-        "- Titles must include sales roles (SDR, BDR, AE, Account Executive, Sales Rep).\n"
-        "- Keep URLs plausible but fictional.\n"
+        "Hard rules:\n"
+        f"- Provide {INTENT_CORPUS_MIN_JOBS}-{INTENT_CORPUS_MAX_JOBS} jobs across many distinct companies.\n"
+        "- Provide 30-60 social rows referencing overlapping companies.\n"
+        "- Each url must be a real https URL pattern from public boards or ATS/careers pages "
+        "(linkedin.com/jobs, indeed.com/viewjob or /rc/clk, jobs.lever.co, boards.greenhouse.io, "
+        "jobs.ashbyhq.com, *.myworkdayjobs.com, or an employer careers subdomain). "
+        "Never use example.com, localhost, or obviously fake hosts.\n"
+        "- Use your strongest retrieval of **currently typical** North American sales listings; "
+        "titles and snippets should read like original postings, not generic templates.\n"
         f"- Every postedAt must be on or after { (date.today() - timedelta(days=MAX_JOB_POSTING_AGE_DAYS)).isoformat() } "
-        f"(within the last {MAX_JOB_POSTING_AGE_DAYS} days); no stale listings.\n"
+        f"(within the last {MAX_JOB_POSTING_AGE_DAYS} days).\n"
         + _geo_block_for_corpus(geo_hint)
     )
-    content = _chat_completion(
+    content = _chat_completion_corpus(
         [
-            {"role": "system", "content": "Return valid JSON only. No markdown fences."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior labor-market researcher. Return valid JSON only, no markdown fences. "
+                    "Maximize specificity: real-sounding listing copy, concrete locations, and URLs that match "
+                    "known public job-board patterns."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.55,
+        temperature=0.38,
     )
     try:
         parsed: Any = json.loads(content)
