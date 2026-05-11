@@ -1,6 +1,7 @@
 import json
 import time
 from html import escape
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -41,7 +42,6 @@ from ui_theme import (
     glass_card_end,
     glass_card_start,
     render_hero,
-    render_loader,
     render_stat_grid,
     render_stepper,
     section_header,
@@ -90,6 +90,8 @@ if "assigned_sdr_label" not in st.session_state:
     st.session_state.assigned_sdr_label = "SDR Team"
 if "max_job_age_days" not in st.session_state:
     st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
+if "_native_session_bootstrap_done" not in st.session_state:
+    st.session_state._native_session_bootstrap_done = False
 
 
 def prev_step():
@@ -240,9 +242,9 @@ def _ensure_intent():
         or cached != max_age
         or cached_geo != geo_key
     ):
-        loader_slot = st.empty()
         stream_info_slot = st.empty()
         stream_table_slot = st.empty()
+        prog = st.progress(0, text="Intent pipeline…")
 
         def _on_jobs_stream(partial_jobs: pd.DataFrame) -> None:
             if partial_jobs is None or partial_jobs.empty:
@@ -250,38 +252,48 @@ def _ensure_intent():
             live_df = partial_jobs.copy()
             if "Posting date" in live_df.columns:
                 live_df = live_df.sort_values("Posting date", ascending=False)
-            stream_info_slot.markdown(
-                f"**Live fetch:** {len(live_df)} rows loaded so far. "
-                "Keep watching while additional rows stream in..."
+            n = len(live_df)
+            stream_info_slot.caption(
+                f"Live fetch: {n} rows so far — additional rows may still stream in."
             )
             stream_table_slot.dataframe(
                 live_df.head(120),
                 width="stretch",
                 hide_index=True,
             )
+            prog.progress(min(92, 15 + min(n, 75)), text=f"Received {n} job rows…")
 
+        pipe_ref: Any = None
         try:
-            loader_slot.markdown(
-                render_loader(
-                    "Building intent corpus",
-                    "Pulling live jobs from boards (Indeed/LinkedIn), applying country weighting, and scoring company intent.",
-                ),
-                unsafe_allow_html=True,
-            )
-            with st.spinner("Generating intent corpus and scoring companies..."):
+            with st.status("Intent pipeline", expanded=True) as pipe:
+                pipe_ref = pipe
+                pipe.update(
+                    label="Running intent pipeline (live boards + LLM fallback, then scoring)…",
+                    state="running",
+                )
+                prog.progress(12, text="Fetching & scoring…")
                 jobs, scored = run_intent_stage(
                     max_job_age_days=max_age,
                     geo_hint=geo_hint,
                     on_jobs_stream=_on_jobs_stream,
                 )
-            st.session_state.company_jobs = jobs
-            st.session_state.company_scored = scored
-            st.session_state._intent_max_age_applied = max_age
-            st.session_state._intent_geo_key_applied = geo_key
-            loader_slot.empty()
-            stream_info_slot.empty()
-            stream_table_slot.empty()
+                st.session_state.company_jobs = jobs
+                st.session_state.company_scored = scored
+                st.session_state._intent_max_age_applied = max_age
+                st.session_state._intent_geo_key_applied = geo_key
+                nj = len(jobs) if isinstance(jobs, pd.DataFrame) else 0
+                nc = len(scored) if isinstance(scored, pd.DataFrame) else 0
+                prog.progress(100, text="Complete")
+                pipe.update(
+                    label=f"Done — {nj} job postings, {nc} companies scored.",
+                    state="complete",
+                )
         except Exception as exc:
+            if pipe_ref is not None:
+                pipe_ref.update(
+                    label=f"Intent failed: {exc}",
+                    state="error",
+                )
             st.error(
                 "Intent stage failed. Check LLM / OpenRouter API keys and `LLM_PROVIDER_ORDER` in `.env` or "
                 "Streamlit secrets. For live Indeed/LinkedIn rows, install **`python-jobspy`** (not the PyPI "
@@ -289,10 +301,26 @@ def _ensure_intent():
             )
             st.session_state.company_jobs = pd.DataFrame()
             st.session_state.company_scored = pd.DataFrame()
+        finally:
+            prog.empty()
+            stream_info_slot.empty()
+            stream_table_slot.empty()
 
 
-_hydrate_from_nocodb()
 st.markdown(get_global_css(), unsafe_allow_html=True)
+
+# Native Streamlit boot: first paint only (avoids flashing on every rerun).
+if not st.session_state._native_session_bootstrap_done:
+    with st.status("Starting hirequity", expanded=False) as _boot:
+        _boot.update(label="Loading saved pipeline from NocoDB…", state="running")
+        _hydrate_from_nocodb()
+        _boot.update(label="Resolving viewer region for job mix…", state="running")
+        _viewer_geo_maybe_refresh()
+        _boot.update(label="Workspace ready.", state="complete")
+    st.session_state._native_session_bootstrap_done = True
+else:
+    _hydrate_from_nocodb()
+    _viewer_geo_maybe_refresh()
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -306,7 +334,6 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    _viewer_geo_maybe_refresh()
     st.text_input("Session id", value=st.session_state.session_id, key="session_id_in")
     st.text_input(
         "Assigned SDR (CRM visibility)",
@@ -317,6 +344,7 @@ with st.sidebar:
     def _apply_session():
         st.session_state.session_id = (st.session_state.session_id_in or "default").strip()
         st.session_state.nocodb_hydrated = False
+        st.session_state._native_session_bootstrap_done = False
         st.session_state.pop("_intent_geo_key_applied", None)
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
@@ -364,6 +392,7 @@ with st.sidebar:
         st.session_state.session_id = "default"
         st.session_state.session_id_in = "default"
         st.session_state.nocodb_hydrated = False
+        st.session_state._native_session_bootstrap_done = False
         st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
         st.rerun()
 
@@ -426,13 +455,7 @@ if st.session_state.step == 0:
         invalidate_intent_corpus_cache()
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
-        st.markdown(
-            render_loader(
-                "Refreshing intent data",
-                "Fetching fresh live listings from job boards and preparing updated scoring tables.",
-            ),
-            unsafe_allow_html=True,
-        )
+        st.toast("Refreshing intent — watch the status block above.", icon="🔄")
         _ensure_intent()
         st.rerun()
 
