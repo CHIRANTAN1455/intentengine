@@ -42,16 +42,22 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
             c = _fallback_contact(company)
 
         name = f"{c['first_name']} {c['last_name']}".strip()
-        rows.append(
-            {
-                "Name": name,
-                "Title": c.get("title", ""),
-                "Company": company,
-                "Email": c.get("email", ""),
-                "Phone": c.get("phone", ""),
-                "LinkedIn": c.get("linkedin_url", ""),
-                "Enrichment verified": False,
-                "Intent reason": intent_reason or "Hiring for sales; intent signals from in-house corpus",
-            }
-        )
+        row_out: dict = {
+            "Name": name,
+            "Title": c.get("title", ""),
+            "Company": company,
+            "Email": c.get("email", ""),
+            "Phone": c.get("phone", ""),
+            "LinkedIn": c.get("linkedin_url", ""),
+            "Enrichment verified": False,
+            "Intent reason": intent_reason or "Hiring for sales; intent signals from in-house corpus",
+        }
+        if "Intent tier" in company_or_leads.columns:
+            row_out["Intent tier"] = str(r.get("Intent tier") or "")
+        if "Intent score" in company_or_leads.columns:
+            try:
+                row_out["Intent score"] = float(r.get("Intent score") or 0.0)
+            except (TypeError, ValueError):
+                row_out["Intent score"] = 0.0
+        rows.append(row_out)
     return pd.DataFrame(rows)

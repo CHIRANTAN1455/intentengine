@@ -65,5 +65,51 @@ To see how the personalized emails look in an actual inbox:
 - `enrichment.py`: The "detective" logic that finds missing contact info.
 - `outreach.py`: The "writer" that drafts personalized messages and handles sending.
 - `requirements.txt`: The list of background tools the app needs to run.
-# intentengine
-# intentengine
+
+## Architectural flow
+
+**End-to-end (what runs in order)**
+
+```mermaid
+flowchart TB
+  User([User — browser])
+  User --> App[Streamlit · main.py]
+  App --> S0[1 Intent — corpus + scores]
+  S0 --> S1[2 Scoring — tier gate]
+  S1 --> S2[3 Enrichment — contacts]
+  S2 --> S3[4 Outreach — sequences + NocoDB log + Walego]
+  S3 --> S4[5 Replies — classify]
+  S4 --> S5[6 CRM — interested records]
+  S5 --> S6[7 Data — dashboard]
+  S6 --> Out([Review metrics])
+
+  OR[(OpenRouter)]
+  DB[(NocoDB)]
+
+  OR -.->|corpus| S0
+  OR -.->|profiles| S2
+  OR -.->|drafts| S3
+  OR -.->|labels| S4
+
+  DB -.->|snapshots| App
+  DB -.->|events| S3
+  DB -.->|CRM log| S5
+```
+
+**Pipeline only (left → right)**
+
+```mermaid
+flowchart LR
+  A[Intent] --> B[Scoring] --> C[Enrich] --> D[Outreach] --> E[Replies] --> F[CRM] --> G[Dashboard]
+```
+
+Plain-text version (always readable):
+
+```
+User → Streamlit (main.py)
+
+Intent → Scoring → Enrich → Outreach → Replies → CRM → Dashboard
+
+OpenRouter: intent corpus · contact profiles · email drafts · reply labels
+NocoDB:     session snapshots · dispatch + events · CRM event log
+```

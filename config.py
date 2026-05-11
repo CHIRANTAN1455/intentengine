@@ -62,8 +62,28 @@ MIN_EMAILS_PER_INBOX_PER_DAY = 20  # used as floor for display / planning
 # Walego: LinkedIn execution only; no duplicate messaging in-app
 WALEGO_HANDOFF_KEY = "walego_payload"
 
-# CRM: only interested leads
+# CRM: lifecycle + deal outcome (deal fields used once SDR owns the lead)
 CRM_STATUSES = ("Interested", "Booked", "Closed")
+
+# Queued outreach: SDR visibility vs automation control
+LEAD_STATUS_QUEUED = "Queued for Outreach"
+LEAD_STATUS_IN_SEQUENCE = "In Sequence"
+LEAD_STATUS_REPLIED = "Replied"
+LEAD_STATUS_MANUAL_RECOMMENDED = "Manual outreach recommended"
+LEAD_STATUS_HIGH_INTENT_REVIEW = "High intent — paused for SDR review"
+LEAD_STATUS_DNC = "Do not contact"
+
+OUTREACH_LOCK_ACTIVE = "Active"
+OUTREACH_LOCK_RELEASED = "Released"
+
+SEQUENCE_PENDING = "Pending"
+SEQUENCE_PAUSED_HIGH_INTENT = "Paused pending SDR review"
+
+# Intent score at or above this pauses automated sequence until SDR reviews (Scenario C)
+HIGH_INTENT_SDR_PAUSE_SCORE = 90.0
+
+# After this many logged email touches with no positive reply → call task (Scenario B)
+CRM_TOUCHES_BEFORE_MANUAL_CALL = 3
 
 # Reply classes
 REPLY_INTERESTED = "Interested"

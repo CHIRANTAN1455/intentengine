@@ -6,7 +6,14 @@ import pandas as pd
 import streamlit as st
 
 from config import BRAND, MAX_EMAILS_PER_INBOX_PER_DAY, REPLY_INTERESTED, REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE
-from crm import build_crm_record, to_crm_dataframe
+from crm import (
+    apply_blacklist_to_records,
+    apply_dispatch_to_records,
+    merge_seed_with_existing,
+    refresh_crm_after_replies,
+    seed_crm_from_enriched,
+    to_crm_dataframe,
+)
 from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
 from email_engine import build_email_sequence
@@ -66,6 +73,8 @@ if "nocodb_hydrated" not in st.session_state:
     st.session_state.nocodb_hydrated = False
 if "session_id_in" not in st.session_state:
     st.session_state.session_id_in = st.session_state.session_id
+if "assigned_sdr_label" not in st.session_state:
+    st.session_state.assigned_sdr_label = "SDR Team"
 
 
 def prev_step():
@@ -198,6 +207,11 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.text_input("Session id", value=st.session_state.session_id, key="session_id_in")
+    st.text_input(
+        "Assigned SDR (CRM visibility)",
+        key="assigned_sdr_label",
+        help="Shown on every lead after enrich. Automation still holds the outreach lock until release rules fire.",
+    )
 
     def _apply_session():
         st.session_state.session_id = (st.session_state.session_id_in or "default").strip()
@@ -322,7 +336,8 @@ elif st.session_state.step == 2:
     st.markdown(
         section_header(
             "Enrichment",
-            "OpenRouter generates structured decision-maker profiles for drafting. Treat emails as fictional until you connect real verification.",
+            "OpenRouter generates structured decision-maker profiles for drafting. Treat emails as fictional until you connect real verification. "
+            "Next step pushes leads into CRM as queued for automation (not free-for-SDR manual work yet).",
         ),
         unsafe_allow_html=True,
     )
@@ -355,7 +370,17 @@ elif st.session_state.step == 2:
     with c1:
         st.button("← Back", on_click=prev_step, use_container_width=True)
     with c2:
-        if st.session_state.leads_enriched is not None and st.button("Outreach sequence →", type="primary", use_container_width=True):
+        if st.session_state.leads_enriched is not None and st.button(
+            "Push to CRM (queued) + Outreach →", type="primary", use_container_width=True
+        ):
+            le2 = st.session_state.leads_enriched
+            assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
+            seeded = seed_crm_from_enriched(le2, assigned, st.session_state.blacklist)
+            st.session_state.crm_records = merge_seed_with_existing(st.session_state.crm_records, seeded)
+            try:
+                append_event("crm_queued", {"records": len(st.session_state.crm_records)})
+            except NocoDBError:
+                pass
             st.session_state.step = 3
             st.rerun()
 
@@ -364,7 +389,8 @@ elif st.session_state.step == 3:
     st.markdown(
         section_header(
             "Outreach",
-            "Sequences are generated with OpenRouter. Dispatch logs to NocoDB (no third-party email send in this build).",
+            "Sequences are generated with OpenRouter. Dispatch logs to NocoDB (no third-party email send in this build). "
+            "CRM rows stay system-coordinated until replies or exhaustion release the outreach lock for SDR action.",
         ),
         unsafe_allow_html=True,
     )
@@ -381,10 +407,28 @@ elif st.session_state.step == 3:
         if st.button("Log outreach dispatch to NocoDB", type="primary", use_container_width=True) or st.session_state.outreach_simulated:
             st.session_state.outreach_simulated = True
             if st.session_state.emails_sent_count == 0 and st.session_state.walego_actions == 0:
+                if not st.session_state.crm_records:
+                    assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
+                    st.session_state.crm_records = seed_crm_from_enriched(le, assigned, st.session_state.blacklist)
                 sent_count = 0
                 w_req = 0
+                touches_by_email: dict[str, int] = {}
+                skipped_high_intent: list[str] = []
                 for _, lead in le.iterrows():
-                    if str(lead.get("Email", "")) in st.session_state.blacklist:
+                    em_addr = str(lead.get("Email", ""))
+                    if em_addr in st.session_state.blacklist:
+                        continue
+                    em_key = em_addr.strip().lower()
+                    rec = next(
+                        (
+                            x
+                            for x in (st.session_state.crm_records or [])
+                            if str(x.get("email", "")).strip().lower() == em_key
+                        ),
+                        None,
+                    )
+                    if rec and rec.get("sequence_paused"):
+                        skipped_high_intent.append(em_addr or em_key)
                         continue
                     seq = build_email_sequence(lead)
                     lead_sent = 0
@@ -395,12 +439,23 @@ elif st.session_state.step == 3:
                         else:
                             st.warning(f"Dispatch log failed for {lead.get('Email')}: {msg}")
                             break
+                    touches_by_email[em_key] = lead_sent
                     sent_count += lead_sent
                     w_req += 1
+                st.session_state.crm_records = apply_dispatch_to_records(
+                    list(st.session_state.crm_records or []),
+                    touches_by_email,
+                )
                 st.session_state.walego_actions = w_req
                 st.session_state.walego_requests = w_req
                 st.session_state.walego_accepted = 0
                 st.session_state.emails_sent_count = sent_count
+                if skipped_high_intent:
+                    st.info(
+                        "High-intent hold: sequence paused until SDR review for: "
+                        + ", ".join(skipped_high_intent[:12])
+                        + ("…" if len(skipped_high_intent) > 12 else "")
+                    )
         for _, lead in le.iterrows():
             if str(lead.get("Email", "")) in st.session_state.blacklist:
                 continue
@@ -434,7 +489,8 @@ elif st.session_state.step == 4:
     st.markdown(
         section_header(
             "Reply intelligence",
-            "Paste sample replies for each lead email (in-house). OpenRouter classifies; only Interested flows to CRM records.",
+            "Paste sample replies for each lead email (in-house). OpenRouter classifies. "
+            "Positive replies release the outreach lock for SDR follow-up; exhaustion after max touches recommends a call task.",
         ),
         unsafe_allow_html=True,
     )
@@ -489,7 +545,7 @@ elif st.session_state.step == 4:
     with c1:
         st.button("← Back", on_click=prev_step, use_container_width=True)
     with c2:
-        if st.button("Build CRM records →", type="primary", use_container_width=True):
+        if st.button("Sync CRM state →", type="primary", use_container_width=True):
             st.session_state.step = 5
             st.rerun()
 
@@ -498,25 +554,17 @@ elif st.session_state.step == 5:
     st.markdown(
         section_header(
             "CRM (in-house)",
-            "Qualified only — records are materialized here and can be persisted via NocoDB snapshots/events.",
+            "Leads enter after enrich as queued for outreach with an active outreach lock. "
+            "SDRs see assignment and state, but the system coordinates touches until release rules apply.",
         ),
         unsafe_allow_html=True,
     )
     le = st.session_state.leads_enriched
-    recs = []
-    by_email = {}
-    for r in st.session_state.replies or []:
-        e = r.get("email")
-        if e:
-            by_email[str(e)] = r
-    if le is not None and not le.empty:
-        for _, lead in le.iterrows():
-            hist = "Outreach: sequences generated + dispatch logged to NocoDB (no external send)."
-            em = str(lead.get("Email") or "")
-            rpl = by_email.get(em) if em else None
-            lab = rpl.get("label") if rpl else REPLY_NOT_INTERESTED
-            if crm_eligible(lab):
-                recs.append(build_crm_record(lead, interaction_log=hist, status="Interested"))
+    assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
+    if le is not None and not le.empty and not st.session_state.crm_records:
+        st.session_state.crm_records = seed_crm_from_enriched(le, assigned, st.session_state.blacklist)
+    recs = apply_blacklist_to_records(list(st.session_state.crm_records or []), st.session_state.blacklist)
+    recs = refresh_crm_after_replies(recs, st.session_state.replies)
     st.session_state.crm_records = recs
     if recs:
         try:
@@ -557,7 +605,11 @@ else:
         unsubscribes=n_unsub,
         walego_accepted=st.session_state.walego_accepted,
         walego_requests=max(st.session_state.walego_requests, 1),
-        interested_in_crm=len(st.session_state.crm_records or []),
+        interested_in_crm=sum(
+            1
+            for r in (st.session_state.crm_records or [])
+            if str(r.get("deal_status") or r.get("status") or "") == "Interested"
+        ),
         booked_calls=0,
         active_conversations=max(0, n_pos - 0),
         stalled_leads=max(0, n_rep - n_pos - n_unsub),
