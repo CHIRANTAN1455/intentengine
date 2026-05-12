@@ -123,17 +123,21 @@ def step_policy_gates() -> bool:
         {"Company": "BetaCorp", "Intent reason": "2 AE roles", "Intent tier": "Medium", "Intent score": 70.0, "Role": "Account Executive"},
     ])
     le = waterfall_enrichment(scored)
-    for col in ("Name", "Email", "Phone", "LinkedIn"):
+    for col in ("Name", "Email", "Phone"):
         if not (le[col] == "").all():
-            log(f"policy: {col} blank in enrichment", "FAIL", "AI contact data leaked!")
+            log(f"policy: {col} blank in enrichment", "FAIL", "person contact data leaked!")
             return False
     if not (le["Contact status"] == CONTACT_PENDING_STATUS).all():
-        log("policy: contact status", "FAIL", "missing Awaiting verified contact")
+        log("policy: contact status", "FAIL", "contact status column mismatch")
         return False
     if not (le["Enrichment verified"] == False).all():  # noqa: E712
         log("policy: Enrichment verified flag", "FAIL", "not all False")
         return False
-    log("policy: contacts blank + status set", "PASS", f"{len(le)} rows, all contact cols empty")
+    acme_title = str(le.loc[le["Company"] == "AcmeCo", "Title"].iloc[0])
+    if acme_title != "SDR":
+        log("policy: job Title carried through", "FAIL", f"got {acme_title!r}")
+        return False
+    log("policy: person fields blank + job Title shown", "PASS", f"{len(le)} rows")
 
     # Email greeting must be generic when name is unverified
     seq = build_email_sequence(le.iloc[0])

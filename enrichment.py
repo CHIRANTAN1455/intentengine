@@ -1,20 +1,18 @@
-"""Contact enrichment — verified sources only.
+"""Contact enrichment — job-board signals plus optional verified contacts.
 
-Policy (set by the client, May 2026):
-    * Zero AI-generated contacts.
-    * Surface contact fields only when they come from a verified provider
-      (Apollo, Hunter, ZoomInfo, etc.). Otherwise leave them blank/null.
-    * Job + company data (Company, Role, Job URL, etc.) is sourced from the
-      live job-board scrape and *is* verified — we keep it as-is.
+Policy:
+    * Zero **AI-invented** person contacts (no LLM names, emails, or phones).
+    * **Job-derived fields** from the live scrape (posting titles, listing URLs,
+      LinkedIn job/company links when the board returns them) are real data and
+      are shown in the enrichment table.
+    * **Person-level** Name / Email / Phone and LinkedIn **/in/** profile URLs
+      are only trusted when ``Enrichment verified`` is true (CSV upload or a
+      future verification provider). Otherwise those fields stay empty unless
+      they pass the board-link heuristic below.
 
-This module previously asked an LLM to invent a decision-maker per company.
-That logic is gone. Until a real verification provider is wired in, the
-enrichment step is effectively "carry through verified job-derived data and
-mark the contact as awaiting verification".
-
-It also exports :func:`sanitize_enriched_dataframe` so any cached / hydrated
-enrichment payload (e.g. from a NocoDB snapshot saved before the migration)
-gets retroactively scrubbed of fabricated values on load.
+This module exports :func:`sanitize_enriched_dataframe` so cached / NocoDB
+snapshots still strip historical fabricated person contacts (``@example.com``,
+placeholder names, etc.).
 """
 
 from __future__ import annotations
@@ -26,13 +24,9 @@ import pandas as pd
 
 VERIFIED_CONTACT_PROVIDERS: tuple[str, ...] = ()  # populate when a provider is integrated
 
-# Status string surfaced on the lead + CRM row so SDRs immediately know that
-# the contact still needs a verified source before any outreach.
-CONTACT_PENDING_STATUS = "Awaiting verified contact"
+# Shown on enriched rows that do not yet have a verified person to email.
+CONTACT_PENDING_STATUS = "Job data — add verified email to dispatch"
 
-# Patterns that the old fabricator / LLM used. Any row matching these is
-# always treated as unverified and stripped, regardless of what flag the
-# stored snapshot may carry.
 _FAKE_EMAIL_DOMAINS = re.compile(
     r"@("
     r"example\.com|example\.org|example\.net|test\.com|sample\.com|"
@@ -46,13 +40,35 @@ _FAKE_NAME_PHRASES = {
     "sam rivera", "sam patel", "sam nguyen", "sam brooks",
     "jordan rivera", "jordan patel", "jordan nguyen", "jordan brooks",
     "casey rivera", "casey patel", "casey nguyen", "casey brooks",
-    # leads.py mock data
     "sarah chen", "rahul sharma", "priya patel", "amit verma",
 }
 _FAKE_LINKEDIN = re.compile(
     r"linkedin\.com/(in|company)/(example|test|placeholder|sample|company-x|user-x)\b",
     re.IGNORECASE,
 )
+
+# Person-level contact columns cleared when the row is not verified.
+_PERSON_CONTACT_COLUMNS = ("Name", "Email", "Phone")
+
+
+def job_board_linkedin_safe(url: Any) -> bool:
+    """True for LinkedIn **job listing** or **company** URLs from boards (not /in/ profiles)."""
+    u = str(url or "").strip().lower()
+    if "linkedin.com" not in u:
+        return False
+    if "/in/" in u:
+        return False
+    if "/jobs/" in u or "/job/" in u or "/company/" in u:
+        return True
+    return False
+
+
+def _linkedin_from_job_urls_sample(sample: Any) -> str:
+    for part in str(sample or "").split("|"):
+        chunk = part.strip()
+        if job_board_linkedin_safe(chunk):
+            return chunk
+    return ""
 
 
 def _looks_fabricated(
@@ -75,7 +91,6 @@ def _looks_fabricated(
         return True
 
     ph = (str(phone) if phone is not None else "").strip()
-    # Old fabricator produced very short / repeating placeholder numbers.
     digits = re.sub(r"\D", "", ph)
     if ph and digits and (len(digits) < 7 or len(set(digits)) <= 2):
         return True
@@ -83,16 +98,8 @@ def _looks_fabricated(
     return False
 
 
-_CONTACT_COLUMNS = ("Name", "Email", "Phone", "LinkedIn", "Title")
-
-
 def sanitize_enriched_dataframe(df: pd.DataFrame | None) -> pd.DataFrame | None:
-    """Strip any fabricated contact data and force ``Enrichment verified = False``.
-
-    Run on every enrichment payload — fresh, cached, or hydrated from NocoDB —
-    so old snapshots (Sarah Chen / Priya Patel / `@example.com`) get scrubbed
-    automatically the next time the app loads.
-    """
+    """Strip fabricated **person** contacts; keep job-board Title / URLs / board LinkedIn."""
     if df is None or len(df) == 0:
         return df
     out = df.copy()
@@ -101,9 +108,9 @@ def sanitize_enriched_dataframe(df: pd.DataFrame | None) -> pd.DataFrame | None:
     if "Contact status" not in out.columns:
         out["Contact status"] = ""
 
-    def _row_unverified(row: pd.Series) -> bool:
-        if not bool(row.get("Enrichment verified")):
-            return True
+    verified_s = out["Enrichment verified"].astype(bool)
+
+    def _fabricated_row(row: pd.Series) -> bool:
         return _looks_fabricated(
             row.get("Name"),
             row.get("Email"),
@@ -111,22 +118,31 @@ def sanitize_enriched_dataframe(df: pd.DataFrame | None) -> pd.DataFrame | None:
             row.get("Phone"),
         )
 
-    mask_blank = out.apply(_row_unverified, axis=1)
-    for col in _CONTACT_COLUMNS:
-        if col in out.columns:
-            out.loc[mask_blank, col] = ""
-    out.loc[mask_blank, "Enrichment verified"] = False
-    out.loc[mask_blank, "Contact status"] = CONTACT_PENDING_STATUS
+    fabricated_s = out.apply(_fabricated_row, axis=1)
+    # Rows that must not keep person-level contact fields as-is.
+    mask_problem = (~verified_s) | (verified_s & fabricated_s)
 
-    # On rows that survive as verified, normalise dtype so later code paths
-    # (mask + dispatch) never trip on numpy.bool_ vs python bool.
+    for col in _PERSON_CONTACT_COLUMNS:
+        if col in out.columns:
+            out.loc[mask_problem, col] = ""
+
+    if "LinkedIn" in out.columns:
+        li_vals = out["LinkedIn"].fillna("").astype(str)
+        keep_board = li_vals.apply(job_board_linkedin_safe)
+        # Unverified: keep only board-derived LinkedIn URLs. Verified+fabricated: strip all LinkedIn.
+        li_blank = mask_problem & (verified_s | ~keep_board)
+        out.loc[li_blank, "LinkedIn"] = ""
+
+    out.loc[mask_problem, "Enrichment verified"] = False
+    out.loc[mask_problem, "Contact status"] = CONTACT_PENDING_STATUS
+
     out["Enrichment verified"] = out["Enrichment verified"].astype(bool)
     return out
 
 
 def _job_role_for_company(row: pd.Series) -> str:
-    """Return the verified open-role string from the scored row, if present."""
-    for key in ("Role", "Hiring role", "Title"):
+    """Open-role line from the scored company row (job board aggregation)."""
+    for key in ("Role (sample)", "Role", "Hiring role", "Title"):
         if key in row and pd.notna(row.get(key)):
             v = str(row.get(key) or "").strip()
             if v:
@@ -142,15 +158,12 @@ def _job_role_for_company(row: pd.Series) -> str:
 
 
 def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
-    """Pass companies through the enrichment step with verified data only.
+    """Merge company-level job signals into the enrichment table shape.
 
-    Output columns:
-        Name / Email / Phone / LinkedIn       -> blank until a verified provider fills them
-        Title (decision-maker title)          -> blank for the same reason
-        Hiring role (verified open role)      -> carried from the scraped posting
-        Company / Intent reason / tier / score -> carried through from scoring
-        Enrichment verified                   -> always False until a provider verifies
-        Contact status                        -> "Awaiting verified contact"
+    * **Title** / **Hiring role** — posting title(s) from the scrape (not a person).
+    * **Job URLs** — sample listing URLs from the boards.
+    * **LinkedIn** — only when the sample URL is a LinkedIn job/company page.
+    * **Name / Email / Phone** — empty until verification; never LLM-filled here.
     """
     if company_or_leads is None or company_or_leads.empty:
         return pd.DataFrame()
@@ -163,20 +176,28 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
         if not company:
             continue
         intent_reason = str(r.get("Intent reason", "") or "")
-        hiring_role = _job_role_for_company(r)
+        role_line = _job_role_for_company(r)
+        urls = str(r.get("Job URLs (sample)") or "").strip()
+        li_board = _linkedin_from_job_urls_sample(urls)
 
         row_out: dict = {
             "Name": "",
-            "Title": "",
+            "Title": role_line,
             "Company": company,
             "Email": "",
             "Phone": "",
-            "LinkedIn": "",
-            "Hiring role": hiring_role,
+            "LinkedIn": li_board,
+            "Hiring role": role_line,
             "Enrichment verified": False,
             "Contact status": CONTACT_PENDING_STATUS,
             "Intent reason": intent_reason or "Hiring signals from verified job boards",
         }
+        if urls:
+            row_out["Job URLs"] = urls
+        if "Location (sample)" in company_or_leads.columns:
+            loc = str(r.get("Location (sample)") or "").strip()
+            if loc:
+                row_out["Location (sample)"] = loc
         if "Intent tier" in company_or_leads.columns:
             row_out["Intent tier"] = str(r.get("Intent tier") or "")
         if "Intent score" in company_or_leads.columns:
@@ -184,19 +205,22 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
                 row_out["Intent score"] = float(r.get("Intent score") or 0.0)
             except (TypeError, ValueError):
                 row_out["Intent score"] = 0.0
+        if "Open sales roles" in company_or_leads.columns:
+            try:
+                row_out["Open sales roles"] = int(r.get("Open sales roles") or 0)
+            except (TypeError, ValueError):
+                row_out["Open sales roles"] = 0
         rows.append(row_out)
     return sanitize_enriched_dataframe(pd.DataFrame(rows))
 
 
 def lead_has_verified_contact(lead: pd.Series | dict) -> bool:
-    """True only when a real verification provider has confirmed the contact."""
+    """True when a real person contact is verified (not job-board URLs alone)."""
     verified = bool(lead.get("Enrichment verified"))
     email = str(lead.get("Email") or "").strip()
     name = str(lead.get("Name") or "").strip()
     if not verified or not email or not name:
         return False
-    # Even if the stored flag is True, refuse to dispatch when the values
-    # look like the historical fabricator output.
     if _looks_fabricated(name, email, lead.get("LinkedIn"), lead.get("Phone")):
         return False
     return True

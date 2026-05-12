@@ -18,6 +18,18 @@ def add_job_signals(jobs: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _unique_join_sample(series: pd.Series, *, max_items: int, sep: str = "; ") -> str:
+    """First ``max_items`` distinct non-empty string values from a column."""
+    seen: list[str] = []
+    for x in series.dropna():
+        s = str(x).strip()
+        if s and s not in seen:
+            seen.append(s)
+        if len(seen) >= max_items:
+            break
+    return sep.join(seen)
+
+
 def aggregate_by_company(jobs: pd.DataFrame) -> pd.DataFrame:
     """Company-level: open sales roles count, min/max age, any urgent."""
     if jobs.empty:
@@ -29,6 +41,8 @@ def aggregate_by_company(jobs: pd.DataFrame) -> pd.DataFrame:
                 "Newest posting (days)",
                 "Has urgent (14d+)",
                 "Job URLs (sample)",
+                "Role (sample)",
+                "Location (sample)",
             ]
         )
     g = (
@@ -50,4 +64,11 @@ def aggregate_by_company(jobs: pd.DataFrame) -> pd.DataFrame:
     )
     url_series = jobs.groupby("Company")["Job URL"].apply(lambda s: " | ".join(s.head(2).astype(str)))
     g["Job URLs (sample)"] = g["Company"].map(url_series)
+    role_titles = jobs.groupby("Company")["Role"].apply(lambda s: _unique_join_sample(s, max_items=3))
+    g["Role (sample)"] = g["Company"].map(role_titles)
+    if "Location" in jobs.columns:
+        locs = jobs.groupby("Company")["Location"].apply(lambda s: _unique_join_sample(s, max_items=2))
+        g["Location (sample)"] = g["Company"].map(locs)
+    else:
+        g["Location (sample)"] = ""
     return g

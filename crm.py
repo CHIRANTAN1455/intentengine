@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from enrichment import job_board_linkedin_safe
+
 from config import (
     CRM_TOUCHES_BEFORE_MANUAL_CALL,
     CRM_STATUSES,
@@ -151,7 +153,7 @@ def seed_post_enrich_row(
     if interaction_log:
         hist_parts.append(interaction_log)
     li = str(lead.get("LinkedIn", "") or "").strip()
-    if not enrichment_verified:
+    if not enrichment_verified and li and not job_board_linkedin_safe(li):
         li = ""
     return {
         "id": _id_for(lead),

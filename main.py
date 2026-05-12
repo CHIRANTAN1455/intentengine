@@ -16,6 +16,7 @@ from config import (
     CORPUS_CA_JOB_SHARE,
     CORPUS_US_JOB_SHARE,
     HIGH_INTENT_MAX_AGE_DAYS,
+    LEAD_STATUS_AWAITING_VERIFIED_CONTACT,
     MEDIUM_INTENT_MAX_AGE_DAYS,
     MAX_EMAILS_PER_INBOX_PER_DAY,
     MAX_JOB_POSTING_AGE_DAYS,
@@ -39,6 +40,7 @@ from role_suggestions import role_based_suggestions
 from enrichment import (
     CONTACT_PENDING_STATUS,
     _looks_fabricated,
+    job_board_linkedin_safe,
     lead_has_verified_contact,
     sanitize_enriched_dataframe,
     waterfall_enrichment,
@@ -169,10 +171,12 @@ def prev_step():
 
 
 def _outreach_lead_strip_unverified_linkedin(lead: pd.Series) -> pd.Series:
-    """Do not show or hand off LinkedIn URLs from LLM drafts until ``Enrichment verified`` is true."""
+    """Drop LinkedIn **person** URLs until verified; keep board job/company links."""
     out = lead.copy()
     if not bool(out.get("Enrichment verified")):
-        out["LinkedIn"] = ""
+        li = str(out.get("LinkedIn") or "").strip()
+        if li and not job_board_linkedin_safe(li):
+            out["LinkedIn"] = ""
     return out
 
 
@@ -199,13 +203,18 @@ def _scrub_crm_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         name = str(rec.get("name") or "").strip()
         email = str(rec.get("email") or "").strip()
         verified = bool(rec.get("enrichment_verified"))
-        if not verified or not email or _looks_fabricated(name, email, rec.get("linkedin"), rec.get("phone")):
+        li_raw = str(rec.get("linkedin") or "").strip()
+        if not verified or not email or _looks_fabricated(name, email, li_raw, rec.get("phone")):
             rec["name"] = ""
             rec["email"] = ""
             rec["phone"] = ""
-            rec["linkedin"] = ""
+            rec["linkedin"] = (
+                li_raw
+                if job_board_linkedin_safe(li_raw) and not _looks_fabricated("", "", li_raw, "")
+                else ""
+            )
             rec["enrichment_verified"] = False
-            rec["lead_status"] = CONTACT_PENDING_STATUS
+            rec["lead_status"] = LEAD_STATUS_AWAITING_VERIFIED_CONTACT
             rec["sequence_paused"] = True
             rec["sequence_status"] = "Paused — awaiting verified contact source"
             rec["outreach_lock"] = "Released"
@@ -884,9 +893,9 @@ elif st.session_state.step == 2:
     st.markdown(
         section_header(
             "Enrichment",
-            "Verified data only. We never invent a contact: Name / Email / Phone / LinkedIn "
-            "stay blank until a verified provider (Apollo, Hunter, ZoomInfo, etc.) supplies them. "
-            "Job-derived signals (Company, Hiring role, Intent reason) are carried through.",
+            "Job-board signals (posting titles, listing URLs, LinkedIn job pages when present) "
+            "are shown as-is. Person fields (Name / Email / Phone / LinkedIn profiles) stay empty "
+            "until you attach a verified contact source.",
         ),
         unsafe_allow_html=True,
     )
@@ -918,7 +927,7 @@ elif st.session_state.step == 2:
             else:
                 with st.status("Enrichment", expanded=True) as enrich_status:
                     enrich_status.update(
-                        label=f"Preparing {len(ready_run)} companies (verified data only, no LLM calls)…",
+                        label=f"Preparing {len(ready_run)} companies (job signals + contact placeholders)…",
                         state="running",
                     )
                     try:
@@ -930,20 +939,18 @@ elif st.session_state.step == 2:
                         n_en = len(st.session_state.leads_enriched)
                         enrich_status.update(state="complete")
                         safe_toast(
-                            f"Enrichment complete — {n_en} compan(y/ies). Attach a verified "
-                            "contact source before dispatch.",
+                            f"Enrichment complete — {n_en} compan(y/ies). Job titles and URLs are in the table.",
                             icon="✅",
                         )
                         _maybe_auto_save_nocodb("enrichment")
                         st.rerun()
     else:
-        st.success("Enrichment ready — verified job-derived data carried through.")
+        st.success("Enrichment ready — job-derived fields are populated below.")
         st.dataframe(st.session_state.leads_enriched, width="stretch", hide_index=True)
         st.info(
-            "Contact fields (Name / Email / Phone / LinkedIn) are intentionally blank. "
-            "Connect a verified data source (Apollo, Hunter, ZoomInfo) or upload a CSV with "
-            "real contacts to flip **Enrichment verified** to true. Dispatch is held until "
-            "that happens."
+            "Name / Email / Phone stay empty until you add a **verified** person (CSV or provider). "
+            "**Title** is the open role from the job scrape (not a hiring manager name). "
+            "Dispatch still requires **Enrichment verified** + a real **Email**."
         )
         if st.button(
             "Generate smart role-based email suggestions",
