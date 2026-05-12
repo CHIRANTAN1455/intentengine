@@ -87,6 +87,26 @@ def _enrichment_queue_df() -> pd.DataFrame:
 # --- PAGE CONFIG ---
 st.set_page_config(page_title=f"{BRAND} – Command Center", page_icon="✦", layout="wide")
 
+
+def safe_toast(message: str, *, icon: str | None = None) -> None:
+    """``st.toast`` that never crashes on a bad icon.
+
+    Streamlit's ``validate_emoji`` rejects look-alike check marks (e.g. ``✓``
+    U+2713) and a stray invalid icon was previously taking the whole pipeline
+    down with ``StreamlitAPIException``. We catch that and retry without the
+    icon so a toast can never become a crash surface.
+    """
+    try:
+        if icon:
+            st.toast(message, icon=icon)
+        else:
+            st.toast(message)
+    except Exception:
+        try:
+            st.toast(message)
+        except Exception:
+            pass
+
 # Session defaults
 if "session_id" not in st.session_state:
     st.session_state.session_id = "default"
@@ -338,7 +358,7 @@ def _client_welcome_background_fragment() -> None:
         return
     merged = _try_merge_prefetch_future()
     if merged and not st.session_state.get("_prefetch_ready_toast_shown"):
-        st.toast("Intent snapshot is ready — enter the command center when you like.", icon="✨")
+        safe_toast("Intent snapshot is ready — enter the command center when you like.", icon="✨")
         st.session_state._prefetch_ready_toast_shown = True
     prog_slot = st.empty()
     fut = st.session_state.get("_intent_prefetch_future")
@@ -491,7 +511,7 @@ def _ensure_intent():
                 prog.progress(100, text="Complete")
                 # Avoid custom label on state="complete" — overlaps with Streamlit's completion chrome.
                 pipe.update(state="complete")
-                st.toast(f"Intent ready — {nj} job postings, {nc} companies scored.", icon="✅")
+                safe_toast(f"Intent ready — {nj} job postings, {nc} companies scored.", icon="✅")
                 intent_refreshed = True
                 try:
                     st.session_state._social_intent_snapshot = fetch_social_intent(geo_hint=geo_hint)
@@ -747,7 +767,7 @@ if st.session_state.step == 0:
         invalidate_intent_corpus_cache()
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
-        st.toast("Refreshing intent — watch the status block above.", icon="🔄")
+        safe_toast("Refreshing intent — watch the status block above.", icon="🔄")
         _ensure_intent()
         st.rerun()
 
@@ -830,7 +850,7 @@ elif st.session_state.step == 2:
                     else:
                         n_en = len(st.session_state.leads_enriched)
                         enrich_status.update(state="complete")
-                        st.toast(
+                        safe_toast(
                             f"Enrichment complete — {n_en} compan(y/ies). Attach a verified "
                             "contact source before dispatch.",
                             icon="✅",
