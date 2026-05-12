@@ -36,7 +36,13 @@ from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
 from email_engine import build_email_sequence
 from role_suggestions import role_based_suggestions
-from enrichment import lead_has_verified_contact, waterfall_enrichment
+from enrichment import (
+    CONTACT_PENDING_STATUS,
+    _looks_fabricated,
+    lead_has_verified_contact,
+    sanitize_enriched_dataframe,
+    waterfall_enrichment,
+)
 from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache
 from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
@@ -178,6 +184,40 @@ def _deserialize_blacklist(items: list[str]) -> None:
     st.session_state.blacklist = set(items or [])
 
 
+def _scrub_crm_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip fabricated contact data from any CRM rows loaded from disk/NocoDB.
+
+    Mirrors :func:`enrichment.sanitize_enriched_dataframe` for the CRM shape so
+    a snapshot saved before the verified-only migration cannot leak
+    ``@example.com`` rows into the live UI.
+    """
+    out: list[dict[str, Any]] = []
+    for raw in records or []:
+        if not isinstance(raw, dict):
+            continue
+        rec = dict(raw)
+        name = str(rec.get("name") or "").strip()
+        email = str(rec.get("email") or "").strip()
+        verified = bool(rec.get("enrichment_verified"))
+        if not verified or not email or _looks_fabricated(name, email, rec.get("linkedin"), rec.get("phone")):
+            rec["name"] = ""
+            rec["email"] = ""
+            rec["phone"] = ""
+            rec["linkedin"] = ""
+            rec["enrichment_verified"] = False
+            rec["lead_status"] = CONTACT_PENDING_STATUS
+            rec["sequence_paused"] = True
+            rec["sequence_status"] = "Paused — awaiting verified contact source"
+            rec["outreach_lock"] = "Released"
+            rec["sdr_manual_allowed"] = False
+            rec["sdr_next_action"] = (
+                "No verified contact yet. Provide a real Email / Name from a verified "
+                "data source before the sequence will run."
+            )
+        out.append(rec)
+    return out
+
+
 def _payload_for_save() -> dict:
     social_df = st.session_state.get("_social_intent_snapshot")
     return {
@@ -227,14 +267,14 @@ def _hydrate_from_payload(payload: dict) -> None:
 
     st.session_state.company_jobs = _df("company_jobs")
     st.session_state.company_scored = _df("company_scored")
-    st.session_state.leads_enriched = _df("leads_enriched")
+    st.session_state.leads_enriched = sanitize_enriched_dataframe(_df("leads_enriched"))
     st.session_state.emails_sent_count = int(payload.get("emails_sent_count") or 0)
     st.session_state.walego_actions = int(payload.get("walego_actions") or 0)
     st.session_state.walego_accepted = int(payload.get("walego_accepted") or 0)
     st.session_state.walego_requests = int(payload.get("walego_requests") or 0)
     st.session_state.replies = list(payload.get("replies") or [])
     _deserialize_blacklist(list(payload.get("blacklist") or []))
-    st.session_state.crm_records = list(payload.get("crm_records") or [])
+    st.session_state.crm_records = _scrub_crm_records(list(payload.get("crm_records") or []))
     st.session_state.outreach_simulated = bool(payload.get("outreach_simulated"))
     st.session_state.replies_built = bool(payload.get("replies_built"))
     rs = payload.get("role_suggestions")
@@ -576,6 +616,15 @@ else:
     _hydrate_from_nocodb()
     _viewer_geo_maybe_refresh()
 
+# Defensive sanitize: even sessions that already had pre-migration values cached
+# in-memory get scrubbed every rerun. Cheap (O(n) over a small frame).
+if isinstance(st.session_state.leads_enriched, pd.DataFrame):
+    st.session_state.leads_enriched = sanitize_enriched_dataframe(
+        st.session_state.leads_enriched
+    )
+if st.session_state.crm_records:
+    st.session_state.crm_records = _scrub_crm_records(st.session_state.crm_records)
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown(
@@ -658,6 +707,23 @@ with st.sidebar:
             st.success("Saved snapshot to NocoDB.")
         except NocoDBError as exc:
             st.error(str(exc))
+
+    if st.button(
+        "Clear stale enriched contacts",
+        width="stretch",
+        help="Wipes any cached enrichment/CRM rows from before the verified-only policy. "
+        "Use this if you still see placeholder names or example.com emails.",
+    ):
+        st.session_state.leads_enriched = None
+        st.session_state.crm_records = []
+        st.session_state.role_suggestions = None
+        st.session_state.outreach_simulated = False
+        st.session_state.emails_sent_count = 0
+        st.session_state.walego_actions = 0
+        st.session_state.walego_accepted = 0
+        st.session_state.walego_requests = 0
+        safe_toast("Cleared. Re-run Enrichment for fresh, verified-only rows.", icon="🧹")
+        st.rerun()
 
     if st.button("Reset pipeline", width="stretch"):
         for k in list(st.session_state.keys()):
