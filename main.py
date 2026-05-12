@@ -36,7 +36,7 @@ from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
 from email_engine import build_email_sequence
 from role_suggestions import role_based_suggestions
-from enrichment import waterfall_enrichment
+from enrichment import lead_has_verified_contact, waterfall_enrichment
 from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache
 from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
@@ -504,9 +504,10 @@ def _ensure_intent():
                     state="error",
                 )
             st.error(
-                "Intent stage failed. Check LLM / OpenRouter API keys and `LLM_PROVIDER_ORDER` in `.env` or "
-                "Streamlit secrets. For live Indeed/LinkedIn rows, install **`python-jobspy`** (not the PyPI "
-                f"package named `jobspy`). Details: {exc}"
+                "Intent stage failed. Check your **ANTHROPIC_API_KEY** / **OPENAI_API_KEY** and "
+                "`LLM_PROVIDER_ORDER` in `.env` or Streamlit secrets. For live Indeed/LinkedIn rows, "
+                "install **`python-jobspy`** (not the PyPI package named `jobspy`). "
+                f"Details: {exc}"
             )
             st.session_state.company_jobs = pd.DataFrame()
             st.session_state.company_scored = pd.DataFrame()
@@ -549,7 +550,7 @@ with st.sidebar:
         <div style="padding:0.1rem 0 0.9rem;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:1rem;">
         <span style="font-size:0.62rem;letter-spacing:0.22em;text-transform:uppercase;color:#a78bfa;">Session</span><br/>
         <span style="font-size:1.15rem;font-weight:700;background:linear-gradient(90deg,#fff,#c4b5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">hirequity</span>
-        <p style="margin:0.35rem 0 0;font-size:0.78rem;color:#71717a !important;">In-house · OpenRouter + NocoDB</p>
+        <p style="margin:0.35rem 0 0;font-size:0.78rem;color:#71717a !important;">In-house · Claude API · NocoDB · verified contacts only</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -701,8 +702,8 @@ if st.session_state.step == 0:
             st.info(
                 "No rows yet — common causes: **(1)** Wrong dependency: the PyPI package `jobspy` is not the board "
                 "scraper; this app needs **`python-jobspy`** (Python **3.10+**). Reinstall from `requirements.txt`. "
-                "**(2)** Missing or invalid **LLM / OpenRouter** keys for the synthetic fallback. "
-                "**(3)** Try **Regenerate intent corpus** after fixing env."
+                "**(2)** Live boards rate-limited / unavailable — try again in a few minutes. "
+                "**(3)** Click **Refresh intent (live job boards)** to retry."
             )
     with d2:
         st.markdown(
@@ -742,7 +743,7 @@ if st.session_state.step == 0:
         if st.button("Continue to scoring →", type="primary", width="stretch"):
             st.session_state.step = 1
             st.rerun()
-    if st.button("Regenerate intent corpus (OpenRouter)", width="stretch"):
+    if st.button("Refresh intent (live job boards)", width="stretch"):
         invalidate_intent_corpus_cache()
         st.session_state.company_jobs = None
         st.session_state.company_scored = None
@@ -784,8 +785,9 @@ elif st.session_state.step == 2:
     st.markdown(
         section_header(
             "Enrichment",
-            "OpenRouter generates structured decision-maker profiles for drafting. Treat emails as fictional until you connect real verification. "
-            "Next step pushes leads into CRM as queued for automation (not free-for-SDR manual work yet).",
+            "Verified data only. We never invent a contact: Name / Email / Phone / LinkedIn "
+            "stay blank until a verified provider (Apollo, Hunter, ZoomInfo, etc.) supplies them. "
+            "Job-derived signals (Company, Hiring role, Intent reason) are carried through.",
         ),
         unsafe_allow_html=True,
     )
@@ -817,27 +819,32 @@ elif st.session_state.step == 2:
             else:
                 with st.status("Enrichment", expanded=True) as enrich_status:
                     enrich_status.update(
-                        label=f"Generating contacts for {len(ready_run)} companies (LLM calls)…",
+                        label=f"Preparing {len(ready_run)} companies (verified data only, no LLM calls)…",
                         state="running",
                     )
                     try:
-                        with st.spinner("This step calls the model once per company — please wait."):
-                            st.session_state.leads_enriched = waterfall_enrichment(ready_run)
+                        st.session_state.leads_enriched = waterfall_enrichment(ready_run)
                     except Exception as exc:
                         enrich_status.update(label=f"Enrichment failed: {exc}", state="error")
                         st.error(f"Enrichment failed. Details: {exc}")
                     else:
                         n_en = len(st.session_state.leads_enriched)
                         enrich_status.update(state="complete")
-                        st.toast(f"Enrichment complete — {n_en} contacts.", icon="✅")
+                        st.toast(
+                            f"Enrichment complete — {n_en} compan(y/ies). Attach a verified "
+                            "contact source before dispatch.",
+                            icon="✅",
+                        )
                         _maybe_auto_save_nocodb("enrichment")
                         st.rerun()
     else:
-        st.success("Contacts generated — ready for sequence drafting.")
+        st.success("Enrichment ready — verified job-derived data carried through.")
         st.dataframe(st.session_state.leads_enriched, width="stretch", hide_index=True)
-        st.caption(
-            "**LinkedIn** is left blank for LLM-drafted contacts. Outreach and CRM omit profile URLs until "
-            "**Enrichment verified** is true on a lead (e.g. after human verification in a future edit flow)."
+        st.info(
+            "Contact fields (Name / Email / Phone / LinkedIn) are intentionally blank. "
+            "Connect a verified data source (Apollo, Hunter, ZoomInfo) or upload a CSV with "
+            "real contacts to flip **Enrichment verified** to true. Dispatch is held until "
+            "that happens."
         )
         if st.button(
             "Generate smart role-based email suggestions",
@@ -873,10 +880,10 @@ elif st.session_state.step == 3:
     st.markdown(
         section_header(
             "Outreach",
-            "Sequences are generated with OpenRouter. LinkedIn profile URLs are omitted here until a lead is marked "
-            "**Enrichment verified** (draft contacts are email/name/title/company only). Dispatch logs to NocoDB "
-            "(no third-party email send in this build). CRM rows stay system-coordinated until replies or exhaustion "
-            "release the outreach lock for SDR action.",
+            "Sequences are built from deterministic templates so they render instantly and never "
+            "fabricate a recipient name. Dispatch only runs for leads with a verified contact "
+            "(**Enrichment verified** + non-empty Email). Everything else is held with status "
+            "**Awaiting verified contact** for SDR review.",
         ),
         unsafe_allow_html=True,
     )
@@ -890,7 +897,25 @@ elif st.session_state.step == 3:
             f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability planning: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day.</div>",
             unsafe_allow_html=True,
         )
-        if st.button("Log outreach dispatch to NocoDB", type="primary", width="stretch") or st.session_state.outreach_simulated:
+        unverified_total = int((~le.apply(lead_has_verified_contact, axis=1)).sum()) if not le.empty else 0
+        verified_total = len(le) - unverified_total if not le.empty else 0
+        if unverified_total:
+            st.warning(
+                f"{unverified_total} lead(s) have no verified contact and will be **held** "
+                "from dispatch. Plug in a verified provider (Apollo / Hunter / ZoomInfo) "
+                "or import a CSV with confirmed contacts before they will be sent."
+            )
+        st.caption(
+            f"Dispatch will run for **{verified_total}** verified lead(s). "
+            "Drafts are still rendered below for every row so SDRs can review the messaging."
+        )
+
+        if st.button(
+            "Log outreach dispatch to NocoDB",
+            type="primary",
+            width="stretch",
+            disabled=verified_total == 0,
+        ) or st.session_state.outreach_simulated:
             st.session_state.outreach_simulated = True
             if st.session_state.emails_sent_count == 0 and st.session_state.walego_actions == 0:
                 if not st.session_state.crm_records:
@@ -900,12 +925,16 @@ elif st.session_state.step == 3:
                 w_req = 0
                 touches_by_email: dict[str, int] = {}
                 skipped_high_intent: list[str] = []
+                skipped_unverified: list[str] = []
                 for _, raw_lead in le.iterrows():
                     lead = _outreach_lead_strip_unverified_linkedin(raw_lead)
-                    em_addr = str(lead.get("Email", ""))
+                    em_addr = str(lead.get("Email", "") or "").strip()
+                    if not lead_has_verified_contact(lead):
+                        skipped_unverified.append(str(lead.get("Company", "")) or "(unknown)")
+                        continue
                     if em_addr in st.session_state.blacklist:
                         continue
-                    em_key = em_addr.strip().lower()
+                    em_key = em_addr.lower()
                     rec = next(
                         (
                             x
@@ -920,11 +949,11 @@ elif st.session_state.step == 3:
                     seq = build_email_sequence(lead)
                     lead_sent = 0
                     for em in seq:
-                        ok, msg = dispatch_email_internal(str(lead.get("Email", "")), em["subject"], em["body"])
+                        ok, msg = dispatch_email_internal(em_addr, em["subject"], em["body"])
                         if ok:
                             lead_sent += 1
                         else:
-                            st.warning(f"Dispatch log failed for {lead.get('Email')}: {msg}")
+                            st.warning(f"Dispatch log failed for {em_addr}: {msg}")
                             break
                     touches_by_email[em_key] = lead_sent
                     sent_count += lead_sent
@@ -937,6 +966,13 @@ elif st.session_state.step == 3:
                 st.session_state.walego_requests = w_req
                 st.session_state.walego_accepted = 0
                 st.session_state.emails_sent_count = sent_count
+                if skipped_unverified:
+                    sample = ", ".join(skipped_unverified[:8])
+                    suffix = "…" if len(skipped_unverified) > 8 else ""
+                    st.info(
+                        f"{len(skipped_unverified)} lead(s) skipped — awaiting verified "
+                        f"contact: {sample}{suffix}"
+                    )
                 if skipped_high_intent:
                     st.info(
                         "High-intent hold: sequence paused until SDR review for: "
@@ -947,21 +983,36 @@ elif st.session_state.step == 3:
             lead = _outreach_lead_strip_unverified_linkedin(raw_lead)
             if str(lead.get("Email", "")) in st.session_state.blacklist:
                 continue
-            n = escape(str(lead.get("Name", "")))
-            c = escape(str(lead.get("Company", "")))
+            company_label = escape(str(lead.get("Company", "")))
+            name_val = str(lead.get("Name", "") or "").strip()
+            verified = lead_has_verified_contact(lead)
+            if name_val and verified:
+                header = escape(name_val)
+                meta = f"{company_label} · Email-first sequence (max 3) + Walego handoff"
+            else:
+                header = company_label
+                meta = (
+                    f"{company_label} · <span style='color:#fbbf24;'>Awaiting verified contact</span> "
+                    "· sequence rendered for SDR preview only"
+                )
             seq = build_email_sequence(lead)
             blocks = [
                 '<div class="hq-lead">',
-                f"<h4>{n}</h4><div class=\"meta\">{c} · Email-first sequence (max 3) + Walego handoff</div>",
+                f"<h4>{header}</h4><div class=\"meta\">{meta}</div>",
             ]
             for em in seq:
                 blocks.append(
                     f'<div class="email-draft-box"><b>Touch {em["step"]}</b> · {escape(em["subject"])}<br><br>{escape(em["body"])}</div>'
                 )
-            blocks.append(
-                f'<p class="meta">Walego JSON payload (execution layer)</p><pre style="font-size:0.75rem;opacity:0.9;">{escape(handoff_to_walego(lead))}</pre>'
-            )
-            blocks.append("<p class=\"meta\">Walego handoff generated (in-house payload).</p></div>")
+            if verified:
+                blocks.append(
+                    f'<p class="meta">Walego JSON payload (execution layer)</p><pre style="font-size:0.75rem;opacity:0.9;">{escape(handoff_to_walego(lead))}</pre>'
+                )
+                blocks.append("<p class=\"meta\">Walego handoff generated (in-house payload).</p></div>")
+            else:
+                blocks.append(
+                    "<p class=\"meta\">Walego handoff withheld until a verified contact is attached.</p></div>"
+                )
             st.markdown("".join(blocks), unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1:
@@ -977,7 +1028,7 @@ elif st.session_state.step == 4:
     st.markdown(
         section_header(
             "Reply intelligence",
-            "Paste sample replies for each lead email (in-house). OpenRouter classifies. "
+            "Paste sample replies for each lead email (in-house). Claude / OpenAI classifies. "
             "Positive replies release the outreach lock for SDR follow-up; exhaustion after max touches recommends a call task.",
         ),
         unsafe_allow_html=True,

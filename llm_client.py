@@ -1,8 +1,17 @@
-"""OpenRouter client utilities for content generation and classification.
+"""LLM client for IntentEngine — Anthropic Claude + OpenAI direct only.
 
-Includes inlined LLM routing (OpenAI / Anthropic / OpenRouter) so Streamlit Cloud
-does not depend on a separate top-level ``llm_client`` import (avoids KeyError
-there in some hosted runtimes).
+OpenRouter has been removed from the codebase. All LLM calls route through:
+  1. Anthropic Claude (primary)  — via ANTHROPIC_API_KEY
+  2. OpenAI                       — via OPENAI_API_KEY (fallback)
+
+Public API:
+    LLMError                       — raised when every configured provider fails
+    chat_completion(...)           — low-level chat call
+    classify_reply_with_llm(...)   — Interested / Not interested / Unsubscribe
+    generate_email_sequence_with_llm(...)
+    suggest_role_strategy_with_llm(...)
+    generate_intent_corpus_with_llm(...)
+    generate_enriched_contact_with_llm(...)  — intentionally disabled, raises
 """
 
 from __future__ import annotations
@@ -22,12 +31,11 @@ from config import (
     MAX_JOB_POSTING_AGE_DAYS,
     _lookup_str,
     _read_optional_env,
-    get_openrouter_settings,
 )
 
 
 class LLMError(RuntimeError):
-    """All configured LLM providers failed."""
+    """All configured LLM providers (Anthropic, OpenAI) failed."""
 
 
 _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -37,23 +45,34 @@ def _llm_timeout_seconds(task: str) -> int:
     if task == "corpus":
         raw = _read_optional_env("LLM_CORPUS_TIMEOUT_SECONDS", "180")
     else:
-        raw = _read_optional_env("OPENROUTER_TIMEOUT_SECONDS", "25")
+        raw = _read_optional_env("LLM_TIMEOUT_SECONDS", "30")
     try:
         return max(10, int(raw))
     except ValueError:
-        return 180 if task == "corpus" else 25
+        return 180 if task == "corpus" else 30
 
 
 def _llm_provider_order() -> list[str]:
-    raw = _read_optional_env("LLM_PROVIDER_ORDER", "openrouter")
+    """Default order: Anthropic (Claude) first, then OpenAI.
+
+    Operators can override with ``LLM_PROVIDER_ORDER=openai,anthropic`` etc.
+    Unknown providers are silently dropped.
+    """
+    raw = _read_optional_env("LLM_PROVIDER_ORDER", "anthropic,openai")
     aliases = {"chatgpt": "openai", "gpt": "openai", "claude": "anthropic"}
+    valid = {"anthropic", "openai"}
     out: list[str] = []
+    seen: set[str] = set()
     for part in raw.split(","):
         p = part.strip().lower()
         if not p:
             continue
-        out.append(aliases.get(p, p))
-    return out or ["openrouter"]
+        provider = aliases.get(p, p)
+        if provider not in valid or provider in seen:
+            continue
+        seen.add(provider)
+        out.append(provider)
+    return out or ["anthropic", "openai"]
 
 
 def _llm_post_json(
@@ -88,6 +107,8 @@ def _llm_post_json(
     raise LLMError(f"{label} failed after retries: {last_err}")
 
 
+# --- OpenAI ---------------------------------------------------------------
+
 def _openai_corpus_max_tokens() -> int:
     raw = _read_optional_env("OPENAI_CORPUS_MAX_TOKENS", "16384") or "16384"
     try:
@@ -109,11 +130,11 @@ def _openai_provider_chat(messages: list[dict[str, str]], temperature: float, ta
     if task == "corpus":
         payload["max_tokens"] = _openai_corpus_max_tokens()
     else:
-        raw_mt = _read_optional_env("OPENAI_MAX_TOKENS", "512") or "512"
+        raw_mt = _read_optional_env("OPENAI_MAX_TOKENS", "1024") or "1024"
         try:
             payload["max_tokens"] = max(16, min(int(raw_mt), 8192))
         except ValueError:
-            payload["max_tokens"] = 512
+            payload["max_tokens"] = 1024
     body = _llm_post_json(
         base,
         {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -128,6 +149,8 @@ def _openai_provider_chat(messages: list[dict[str, str]], temperature: float, ta
         raise LLMError("openai: empty content")
     return content
 
+
+# --- Anthropic Claude -----------------------------------------------------
 
 def _anthropic_max_tokens(task: str) -> int:
     if task == "corpus":
@@ -144,6 +167,7 @@ def _anthropic_max_tokens(task: str) -> int:
 
 
 def _anthropic_split_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
+    """Claude takes ``system`` as a top-level field, not as a message role."""
     system_parts: list[str] = []
     out: list[dict[str, str]] = []
     for m in messages:
@@ -167,7 +191,7 @@ def _anthropic_provider_chat(messages: list[dict[str, str]], temperature: float,
     if task == "corpus":
         model = _read_optional_env("ANTHROPIC_CORPUS_MODEL", "claude-3-5-sonnet-20241022")
     else:
-        model = _read_optional_env("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+        model = _read_optional_env("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
     system, msgs = _anthropic_split_messages(messages)
     if not msgs:
         raise LLMError("anthropic: no user/assistant messages")
@@ -197,56 +221,7 @@ def _anthropic_provider_chat(messages: list[dict[str, str]], temperature: float,
     return content
 
 
-def _openrouter_corpus_max_tokens() -> int:
-    raw = _read_optional_env("OPENROUTER_CORPUS_MAX_TOKENS", "16384") or "16384"
-    try:
-        return max(4096, int(raw))
-    except ValueError:
-        return 16384
-
-
-def _openrouter_default_max_tokens() -> int:
-    """Cap completion tokens for normal chat calls (OpenRouter bills against max_tokens)."""
-    raw = _read_optional_env("OPENROUTER_MAX_TOKENS", "512") or "512"
-    try:
-        return max(16, min(int(raw), 8192))
-    except ValueError:
-        return 512
-
-
-def _openrouter_provider_chat(messages: list[dict[str, str]], temperature: float, task: str) -> str:
-    if not _lookup_str("OPENROUTER_API_KEY"):
-        raise LLMError("openrouter: OPENROUTER_API_KEY not set")
-    settings = get_openrouter_settings()
-    model = settings.model
-    if task == "corpus":
-        override = _read_optional_env("OPENROUTER_CORPUS_MODEL", "")
-        if override:
-            model = override
-    payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
-    if task == "corpus":
-        payload["max_tokens"] = _openrouter_corpus_max_tokens()
-    else:
-        payload["max_tokens"] = _openrouter_default_max_tokens()
-    body = _llm_post_json(
-        settings.base_url,
-        {
-            "Authorization": f"Bearer {settings.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": settings.http_referer,
-            "X-Title": settings.app_title,
-        },
-        payload,
-        "openrouter",
-        timeout=_llm_timeout_seconds(task),
-    )
-    content = (
-        body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-    ).strip()
-    if not content:
-        raise LLMError("openrouter: empty content")
-    return content
-
+# --- Router ---------------------------------------------------------------
 
 def chat_completion(
     messages: list[dict[str, str]],
@@ -254,15 +229,14 @@ def chat_completion(
     *,
     task: str = "default",
 ) -> str:
+    """Route a chat completion through the configured providers in order."""
     errors: list[str] = []
     for provider in _llm_provider_order():
         try:
-            if provider == "openai":
-                return _openai_provider_chat(messages, temperature, task)
             if provider == "anthropic":
                 return _anthropic_provider_chat(messages, temperature, task)
-            if provider == "openrouter":
-                return _openrouter_provider_chat(messages, temperature, task)
+            if provider == "openai":
+                return _openai_provider_chat(messages, temperature, task)
             errors.append(f"unknown provider: {provider}")
         except LLMError as exc:
             errors.append(str(exc))
@@ -270,26 +244,17 @@ def chat_completion(
     raise LLMError(" | ".join(errors) if errors else "no LLM providers configured")
 
 
-class OpenRouterError(RuntimeError):
-    """Raised for upstream LLM / OpenRouter failures."""
+def _chat(messages: list[dict[str, str]], temperature: float) -> str:
+    return chat_completion(messages, temperature, task="default")
 
 
-def _chat_completion(messages: list[dict[str, str]], temperature: float) -> str:
-    try:
-        return chat_completion(messages, temperature, task="default")
-    except LLMError as exc:
-        raise OpenRouterError(str(exc)) from exc
+def _chat_corpus(messages: list[dict[str, str]], temperature: float) -> str:
+    return chat_completion(messages, temperature, task="corpus")
 
 
-def _chat_completion_corpus(messages: list[dict[str, str]], temperature: float) -> str:
-    """Large JSON intent corpus: uses task=corpus (stronger models, higher max tokens, longer timeout)."""
-    try:
-        return chat_completion(messages, temperature, task="corpus")
-    except LLMError as exc:
-        raise OpenRouterError(str(exc)) from exc
+# --- Public task helpers --------------------------------------------------
 
-
-def classify_reply_with_openrouter(text: str) -> str:
+def classify_reply_with_llm(text: str) -> str:
     """Return one of: Interested | Not interested | Unsubscribe."""
     prompt = (
         "Classify the following sales email reply into exactly one label: "
@@ -297,12 +262,9 @@ def classify_reply_with_openrouter(text: str) -> str:
         "Reply only with JSON like {\"label\": \"Interested\"}.\n\n"
         f"Reply text: {text}"
     )
-    content = _chat_completion(
+    content = _chat(
         [
-            {
-                "role": "system",
-                "content": "You are a strict classifier. Return valid JSON only.",
-            },
+            {"role": "system", "content": "You are a strict classifier. Return valid JSON only."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.0,
@@ -311,29 +273,40 @@ def classify_reply_with_openrouter(text: str) -> str:
         parsed: dict[str, Any] = json.loads(content)
         label = str(parsed.get("label", "")).strip()
     except json.JSONDecodeError as exc:
-        raise OpenRouterError(f"Invalid JSON classification response: {content}") from exc
+        raise LLMError(f"Invalid JSON classification response: {content}") from exc
     if label not in {"Interested", "Not interested", "Unsubscribe"}:
-        raise OpenRouterError(f"Unexpected classification label: {label}")
+        raise LLMError(f"Unexpected classification label: {label}")
     return label
 
 
-def generate_email_sequence_with_openrouter(
+def generate_email_sequence_with_llm(
     lead_context: dict[str, str], max_emails: int
 ) -> list[dict[str, str]]:
-    """Generate outreach sequence as JSON list of {step, subject, body}."""
+    """Generate outreach sequence as JSON list of {step, subject, body}.
+
+    Strict guardrail: never invent a contact's name. If
+    ``lead_context["has_verified_name"] != "true"`` the model is instructed to
+    use a neutral ``"Hi there,"`` greeting.
+    """
     prompt = (
         "Generate a concise outbound sequence in JSON only.\n"
-        "Rules: list length equals max_emails; each item has step (int), subject (string), body (string); "
-        "professional tone, one CTA, no spammy claims.\n"
+        "Rules: list length equals max_emails; each item has step (int), "
+        "subject (string), body (string); professional tone, one CTA, no spammy claims.\n"
         "Do not mention LinkedIn, profile views, or any social URLs — contact data is draft-only.\n"
+        "CRITICAL: never invent a recipient's name. If has_verified_name is "
+        "'false' (or missing), greet with 'Hi there,' and do NOT use a first or last name.\n"
         f"max_emails={max_emails}\n"
         f"lead_context={json.dumps(lead_context)}"
     )
-    content = _chat_completion(
+    content = _chat(
         [
             {
                 "role": "system",
-                "content": "Return valid JSON only. No markdown fences. Never include LinkedIn URLs or claims of having viewed a profile.",
+                "content": (
+                    "Return valid JSON only. No markdown fences. Never include LinkedIn "
+                    "URLs or claims of having viewed a profile. Never fabricate a "
+                    "recipient name, email, or phone number."
+                ),
             },
             {"role": "user", "content": prompt},
         ],
@@ -342,9 +315,9 @@ def generate_email_sequence_with_openrouter(
     try:
         parsed: Any = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise OpenRouterError(f"Invalid JSON sequence response: {content}") from exc
+        raise LLMError(f"Invalid JSON sequence response: {content}") from exc
     if not isinstance(parsed, list):
-        raise OpenRouterError("Email sequence response must be a JSON list.")
+        raise LLMError("Email sequence response must be a JSON list.")
     cleaned: list[dict[str, str]] = []
     for idx, item in enumerate(parsed, start=1):
         if not isinstance(item, dict):
@@ -355,18 +328,18 @@ def generate_email_sequence_with_openrouter(
             continue
         cleaned.append({"step": idx, "subject": subject, "body": body})
     if not cleaned:
-        raise OpenRouterError("No valid email sequence generated.")
+        raise LLMError("No valid email sequence generated.")
     return cleaned[:max_emails]
 
 
-def suggest_role_strategy_with_openrouter(role_context: dict[str, str]) -> dict[str, str]:
+def suggest_role_strategy_with_llm(role_context: dict[str, str]) -> dict[str, str]:
     """Return role strategy JSON with angle, value_prop, cta, subject_hook."""
     prompt = (
         "You are a B2B outbound strategist. Return JSON only with keys: "
         "angle, value_prop, cta, subject_hook. Keep each under 20 words.\n"
         f"role_context={json.dumps(role_context)}"
     )
-    content = _chat_completion(
+    content = _chat(
         [
             {"role": "system", "content": "Return valid JSON only. No markdown."},
             {"role": "user", "content": prompt},
@@ -376,7 +349,7 @@ def suggest_role_strategy_with_openrouter(role_context: dict[str, str]) -> dict[
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise OpenRouterError(f"Invalid JSON role strategy response: {content}") from exc
+        raise LLMError(f"Invalid JSON role strategy response: {content}") from exc
     out = {
         "angle": str(parsed.get("angle", "")).strip(),
         "value_prop": str(parsed.get("value_prop", "")).strip(),
@@ -384,9 +357,11 @@ def suggest_role_strategy_with_openrouter(role_context: dict[str, str]) -> dict[
         "subject_hook": str(parsed.get("subject_hook", "")).strip(),
     }
     if not all(out.values()):
-        raise OpenRouterError(f"Incomplete role strategy response: {out}")
+        raise LLMError(f"Incomplete role strategy response: {out}")
     return out
 
+
+# --- Intent corpus (opt-in only; gated by ALLOW_SYNTHETIC_INTENT_CORPUS) ---
 
 def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
     pct_ca = int(round(100 * CORPUS_CA_JOB_SHARE))
@@ -411,20 +386,18 @@ def _geo_block_for_corpus(geo_hint: dict[str, Any] | None) -> str:
         lines.append(
             "- The viewer is outside US/Canada; still keep the US+Canada job share as above (North American GTM hiring demand)."
         )
-    lines.append(
-        '- Every job must include "countryCode" and use only "CA" or "US".'
-    )
+    lines.append('- Every job must include "countryCode" and use only "CA" or "US".')
     lines.append(
         "- Social rows should reference the same companies / hiring motion; keep geography consistent with the jobs."
     )
     return "\n".join(lines) + "\n"
 
 
-def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
-    """
-    Structured hiring intent data for the pipeline (LLM fallback when live boards are sparse).
-    Prefer real public job-board / ATS URLs and faithful listing detail—not placeholders.
-    Returns JSON object: { "jobs": [...], "social": [...] }.
+def generate_intent_corpus_with_llm(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Structured hiring intent data (LLM fallback). Returns {"jobs":[], "social":[]}.
+
+    Note: this is only invoked when ``ALLOW_SYNTHETIC_INTENT_CORPUS=1`` and is
+    therefore off by default in production.
     """
     prompt = (
         "Return JSON only with this shape:\n"
@@ -438,38 +411,29 @@ def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = Non
         '      "countryCode": "US" or "CA",\n'
         '      "source": "linkedin|indeed|lever|greenhouse|ashby|workday|careers_site|other",\n'
         '      "location": "City, Region (e.g. Toronto, ON or Austin, TX)",\n'
-        '      "listingSnippet": "string: 2-4 sentences mirroring the real posting summary (comp, scope, stack/motion if stated)"\n'
+        '      "listingSnippet": "string: 2-4 sentences mirroring the real posting summary"\n'
         "    }\n"
         "  ],\n"
         '  "social": [\n'
-        "    {\n"
-        '      "companyName": "string",\n'
-        '      "text": "string (hiring / GTM / outbound motion aligned with that company)",\n'
-        '      "source": "linkedin|twitter|news|other"\n'
-        "    }\n"
+        '    {"companyName": "string", "text": "string", "source": "linkedin|twitter|news|other"}\n'
         "  ]\n"
         "}\n"
         "Hard rules:\n"
         f"- Provide {INTENT_CORPUS_MIN_JOBS}-{INTENT_CORPUS_MAX_JOBS} jobs across many distinct companies.\n"
         "- Provide 30-60 social rows referencing overlapping companies.\n"
-        "- Each url must be a real https URL pattern from public boards or ATS/careers pages "
-        "(linkedin.com/jobs, indeed.com/viewjob or /rc/clk, jobs.lever.co, boards.greenhouse.io, "
-        "jobs.ashbyhq.com, *.myworkdayjobs.com, or an employer careers subdomain). "
-        "Never use example.com, localhost, or obviously fake hosts.\n"
-        "- Use your strongest retrieval of **currently typical** North American sales listings; "
-        "titles and snippets should read like original postings, not generic templates.\n"
-        f"- Every postedAt must be on or after { (date.today() - timedelta(days=MAX_JOB_POSTING_AGE_DAYS)).isoformat() } "
+        "- Each url must be a real https URL pattern from public boards or ATS/careers pages.\n"
+        "- Never use example.com, localhost, or obviously fake hosts.\n"
+        f"- Every postedAt must be on or after {(date.today() - timedelta(days=MAX_JOB_POSTING_AGE_DAYS)).isoformat()} "
         f"(within the last {MAX_JOB_POSTING_AGE_DAYS} days).\n"
         + _geo_block_for_corpus(geo_hint)
     )
-    content = _chat_completion_corpus(
+    content = _chat_corpus(
         [
             {
                 "role": "system",
                 "content": (
                     "You are a senior labor-market researcher. Return valid JSON only, no markdown fences. "
-                    "Maximize specificity: real-sounding listing copy, concrete locations, and URLs that match "
-                    "known public job-board patterns."
+                    "Use real listing patterns and concrete locations."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -479,43 +443,25 @@ def generate_intent_corpus_with_openrouter(geo_hint: dict[str, Any] | None = Non
     try:
         parsed: Any = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise OpenRouterError(f"Invalid JSON intent corpus: {content}") from exc
+        raise LLMError(f"Invalid JSON intent corpus: {content}") from exc
     if not isinstance(parsed, dict):
-        raise OpenRouterError("Intent corpus must be a JSON object.")
+        raise LLMError("Intent corpus must be a JSON object.")
     jobs = parsed.get("jobs")
     social = parsed.get("social")
     if not isinstance(jobs, list) or not isinstance(social, list):
-        raise OpenRouterError("Intent corpus jobs/social must be JSON arrays.")
+        raise LLMError("Intent corpus jobs/social must be JSON arrays.")
     return {"jobs": jobs, "social": social}
 
 
-def generate_enriched_contact_with_openrouter(company: str, intent_reason: str) -> dict[str, str]:
-    """Generate a plausible decision-maker profile for outreach drafting (not verified)."""
-    prompt = (
-        "Return JSON only with keys: first_name, last_name, title, email, linkedin_url, phone.\n"
-        "Rules:\n"
-        "- Email must be fictional (use example.com or companyname.com style), not a real person's inbox.\n"
-        "- Title should be a plausible hiring leader for sales hiring.\n"
-        "- linkedin_url must be an empty string \"\". Do not invent profile URLs — they are unsafe and misleading.\n"
-        "- phone may be \"\" if unknown; do not fabricate phone numbers.\n"
-        f"company={json.dumps(company)}\n"
-        f"intent_reason={json.dumps(intent_reason)}\n"
+def generate_enriched_contact_with_llm(company: str, intent_reason: str) -> dict[str, str]:
+    """Deprecated and intentionally disabled.
+
+    AI contact generation is permanently off. Contact data must come from a
+    verified provider (Apollo, Hunter, ZoomInfo, etc.) or remain blank.
+    Any caller that imports this will get an LLMError so fabricated rows can
+    never accidentally enter the pipeline again.
+    """
+    raise LLMError(
+        "AI contact generation is disabled. Use a verified data source or "
+        "return blank contact fields."
     )
-    content = _chat_completion(
-        [
-            {"role": "system", "content": "Return valid JSON only. No markdown fences."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.35,
-    )
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise OpenRouterError(f"Invalid JSON contact response: {content}") from exc
-    if not isinstance(parsed, dict):
-        raise OpenRouterError("Contact response must be a JSON object.")
-    out = {k: str(parsed.get(k, "") or "").strip() for k in ("first_name", "last_name", "title", "email", "linkedin_url", "phone")}
-    if not out["first_name"] or not out["last_name"] or not out["email"]:
-        raise OpenRouterError("Incomplete contact JSON.")
-    out["linkedin_url"] = ""
-    return out

@@ -1,4 +1,4 @@
-"""Intent ingestion: live job boards first, OpenRouter fallback."""
+"""Intent ingestion: live job boards first; optional LLM fallback (off by default)."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from config import (
     LIVE_JOB_SITES,
     MAX_JOB_POSTING_AGE_DAYS,
     SALES_ROLE_KEYWORDS,
+    allow_synthetic_intent_corpus,
 )
-from openrouter_client import OpenRouterError, generate_intent_corpus_with_openrouter
+from llm_client import LLMError, generate_intent_corpus_with_llm
 
 # Per–geo-hint cache (15 min) so different viewers do not share the wrong region.
 _CORPUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -243,24 +244,28 @@ def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
     if entry and now < entry[0]:
         return entry[1]
     corpus = _live_jobspy_corpus(geo_hint=geo_hint)
-    if len(list(corpus.get("jobs", []) or [])) < max(15, int(INTENT_CORPUS_MIN_JOBS * 0.35)):
-        # Fallback to synthetic only when live pull is unavailable/sparse.
+    if (
+        len(list(corpus.get("jobs", []) or [])) < max(15, int(INTENT_CORPUS_MIN_JOBS * 0.35))
+        and allow_synthetic_intent_corpus()
+    ):
+        # Synthetic LLM-generated job listings are *only* allowed when the
+        # operator opts in via ALLOW_SYNTHETIC_INTENT_CORPUS=1. By default this
+        # branch never runs so the pipeline only surfaces verified board data.
         corpus = {"jobs": [], "social": []}
         with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
             futures = [
-                ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
+                ex.submit(generate_intent_corpus_with_llm, geo_hint=geo_hint)
                 for _ in range(_CORPUS_FETCH_ATTEMPTS)
             ]
             for fut in as_completed(futures):
                 try:
                     chunk = fut.result()
-                except OpenRouterError:
+                except LLMError:
                     continue
                 corpus = _merge_corpora(corpus, chunk)
                 if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
                     break
     job_n = len(list(corpus.get("jobs", []) or []))
-    # Do not cache empty failures for 15m — that made the UI stick on "0 jobs" after transient errors.
     ttl = 15 * 60 if job_n > 0 else 45
     _CORPUS_CACHE[key] = (now + ttl, corpus)
     return corpus
@@ -280,7 +285,7 @@ def _job_rows_from_raw_jobs(raw_jobs: list[Any]) -> list[dict[str, Any]]:
             "Role": role,
             "Job URL": str(item.get("url") or item.get("jobUrl") or ""),
             "Posting date": _parse_posted_date(item.get("postedAt") or item.get("datePosted")),
-            "Source": str(item.get("source") or "inhouse_openrouter"),
+            "Source": str(item.get("source") or "live_job_boards"),
             "Country code": str(item.get("countryCode") or "").strip().upper(),
         }
         loc = str(item.get("location") or "").strip()
@@ -319,18 +324,21 @@ def fetch_job_postings_stream(
         on_rows(partial_df)
 
     corpus = _live_jobspy_corpus(geo_hint=geo_hint, on_partial_jobs=_on_partial)
-    if len(list(corpus.get("jobs", []) or [])) < max(15, int(INTENT_CORPUS_MIN_JOBS * 0.35)):
-        # keep streaming even in fallback mode
+    if (
+        len(list(corpus.get("jobs", []) or [])) < max(15, int(INTENT_CORPUS_MIN_JOBS * 0.35))
+        and allow_synthetic_intent_corpus()
+    ):
+        # Synthetic LLM corpus is opt-in only (ALLOW_SYNTHETIC_INTENT_CORPUS=1).
         corpus = {"jobs": [], "social": []}
         with ThreadPoolExecutor(max_workers=_CORPUS_MAX_FETCH_THREADS) as ex:
             futures = [
-                ex.submit(generate_intent_corpus_with_openrouter, geo_hint=geo_hint)
+                ex.submit(generate_intent_corpus_with_llm, geo_hint=geo_hint)
                 for _ in range(_CORPUS_FETCH_ATTEMPTS)
             ]
             for fut in as_completed(futures):
                 try:
                     chunk = fut.result()
-                except OpenRouterError:
+                except LLMError:
                     continue
                 corpus = _merge_corpora(corpus, chunk)
                 partial_jobs = _enforce_country_priority_mix(list(corpus.get("jobs", []) or []))
@@ -430,7 +438,7 @@ def fetch_social_intent(geo_hint: dict[str, Any] | None = None) -> pd.DataFrame:
             {
                 "Company": company,
                 "Signal": signal,
-                "Source": str(item.get("source") or "inhouse_openrouter"),
+                "Source": str(item.get("source") or "live_job_boards"),
             }
         )
     return pd.DataFrame(rows)
