@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
+import math
 from typing import Any
 
 import requests
@@ -12,6 +14,50 @@ from config import get_nocodb_settings
 
 class NocoDBError(RuntimeError):
     pass
+
+
+def _json_default(o: Any) -> Any:
+    """JSON fallback for pandas / numpy / datetime values in the payload.
+
+    Without this, snapshot persistence crashes the Streamlit app with
+    ``TypeError: Object of type <date|bool_|int64|Timestamp|...>`` the first
+    time the pipeline tries to round-trip a DataFrame-derived row.
+    """
+    # numpy / pandas scalars expose ``.item()`` to reach a native Python value.
+    item = getattr(o, "item", None)
+    if callable(item):
+        try:
+            v = item()
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            if isinstance(v, (_dt.date, _dt.datetime)):
+                return v.isoformat()
+            return v
+        except Exception:
+            pass
+
+    if isinstance(o, (_dt.date, _dt.datetime)):
+        return o.isoformat()
+    if isinstance(o, _dt.timedelta):
+        return o.total_seconds()
+    if isinstance(o, (set, frozenset)):
+        return sorted(o, key=str)
+    if isinstance(o, (bytes, bytearray)):
+        return o.decode("utf-8", errors="replace")
+
+    try:
+        import pandas as pd  # noqa: WPS433 — optional import; pandas is a hard dep elsewhere
+        if pd.isna(o):
+            return None
+    except Exception:
+        pass
+
+    # Last-resort coercion — better than crashing the whole save.
+    return str(o)
+
+
+def _safe_dumps(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=True, default=_json_default)
 
 
 def _headers() -> dict[str, str]:
@@ -70,7 +116,7 @@ def upsert_snapshot(session_id: str, step: int, payload: dict[str, Any]) -> str:
     body = {
         s.field_session_id: session_id,
         s.field_step: step,
-        s.field_payload_json: json.dumps(payload, ensure_ascii=True),
+        s.field_payload_json: _safe_dumps(payload),
     }
     if rid:
         patch_url = f"{url}/{rid}"
@@ -97,7 +143,7 @@ def append_event(event_type: str, payload: dict[str, Any]) -> None:
     url = _table_url(s.events_table_id)
     body = {
         s.field_event_type: event_type,
-        s.field_event_payload_json: json.dumps(payload, ensure_ascii=True),
+        s.field_event_payload_json: _safe_dumps(payload),
     }
     response = requests.post(url, headers=_headers(), json=body, timeout=30)
     if response.status_code >= 400:

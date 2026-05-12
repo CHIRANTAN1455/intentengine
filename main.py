@@ -399,18 +399,31 @@ def _save_to_nocodb() -> None:
 
 
 def _maybe_auto_save_nocodb(reason: str) -> None:
+    """Best-effort persist the pipeline snapshot to NocoDB.
+
+    Auto-save must never break the user-visible flow — any error (TypeError
+    from a stray non-serializable value, NocoDBError from a misconfigured
+    table, transient network blip) is swallowed and surfaced as a quiet
+    in-app warning instead of crashing the page.
+    """
     if not auto_save_pipeline_to_nocodb():
         return
     try:
         upsert_snapshot(st.session_state.session_id, int(st.session_state.step), _payload_for_save())
-        try:
-            append_event(
-                "pipeline_auto_save",
-                {"session_id": st.session_state.session_id, "step": st.session_state.step, "reason": reason},
-            )
-        except NocoDBError:
-            pass
+    except NocoDBError as exc:
+        st.warning(f"Auto-save to NocoDB failed ({reason}): {exc}")
+        return
+    except Exception as exc:
+        st.warning(f"Auto-save to NocoDB skipped ({reason}): {exc}")
+        return
+    try:
+        append_event(
+            "pipeline_auto_save",
+            {"session_id": st.session_state.session_id, "step": st.session_state.step, "reason": reason},
+        )
     except NocoDBError:
+        pass
+    except Exception:
         pass
 
 
