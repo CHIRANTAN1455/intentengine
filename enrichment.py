@@ -1,4 +1,4 @@
-"""Contact enrichment — job-board signals plus optional verified contacts.
+"""Contact enrichment — job-board signals + optional Apollo-verified people.
 
 Policy:
     * Zero **AI-invented** person contacts (no LLM names, emails, or phones).
@@ -6,9 +6,10 @@ Policy:
       LinkedIn job/company links when the board returns them) are real data and
       are shown in the enrichment table.
     * **Person-level** Name / Email / Phone and LinkedIn **/in/** profile URLs
-      are only trusted when ``Enrichment verified`` is true (CSV upload or a
-      future verification provider). Otherwise those fields stay empty unless
-      they pass the board-link heuristic below.
+      are trusted when ``Enrichment verified`` is true after **Apollo.io**
+      ``people/match`` returns a revealed email (consumes Apollo credits), or
+      when a future CSV/provider path sets the flag. Otherwise those fields stay
+      empty unless they pass the board-link heuristic for LinkedIn job URLs.
 
 This module exports :func:`sanitize_enriched_dataframe` so cached / NocoDB
 snapshots still strip historical fabricated person contacts (``@example.com``,
@@ -18,11 +19,13 @@ placeholder names, etc.).
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
-VERIFIED_CONTACT_PROVIDERS: tuple[str, ...] = ()  # populate when a provider is integrated
+from apollo_enrichment import apollo_contact_enrichment_available, run_apollo_waterfall_on_dataframe
+
+VERIFIED_CONTACT_PROVIDERS: tuple[str, ...] = ("apollo",)
 
 # Shown on enriched rows that do not yet have a verified person to email.
 CONTACT_PENDING_STATUS = "Job data — add verified email to dispatch"
@@ -135,6 +138,8 @@ def sanitize_enriched_dataframe(df: pd.DataFrame | None) -> pd.DataFrame | None:
 
     out.loc[mask_problem, "Enrichment verified"] = False
     out.loc[mask_problem, "Contact status"] = CONTACT_PENDING_STATUS
+    if "Contact source" in out.columns:
+        out.loc[mask_problem, "Contact source"] = ""
 
     out["Enrichment verified"] = out["Enrichment verified"].astype(bool)
     return out
@@ -157,13 +162,19 @@ def _job_role_for_company(row: pd.Series) -> str:
     return ""
 
 
-def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
-    """Merge company-level job signals into the enrichment table shape.
+def waterfall_enrichment(
+    company_or_leads: pd.DataFrame,
+    *,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> pd.DataFrame:
+    """Merge company-level job signals, then optionally Apollo person + email.
 
-    * **Title** / **Hiring role** — posting title(s) from the scrape (not a person).
+    * **Hiring role** — posting title(s) from the scrape (kept on every row).
+    * **Title** — same as hiring role until Apollo fills the decision-maker title.
     * **Job URLs** — sample listing URLs from the boards.
-    * **LinkedIn** — only when the sample URL is a LinkedIn job/company page.
-    * **Name / Email / Phone** — empty until verification; never LLM-filled here.
+    * **LinkedIn** — job/company board URL until Apollo returns a person profile URL.
+    * **Name / Email / Phone** — from Apollo when ``APOLLO_API_KEY`` is set (bounded
+      batch per run); never LLM-invented.
     """
     if company_or_leads is None or company_or_leads.empty:
         return pd.DataFrame()
@@ -188,6 +199,7 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
             "Phone": "",
             "LinkedIn": li_board,
             "Hiring role": role_line,
+            "Contact source": "",
             "Enrichment verified": False,
             "Contact status": CONTACT_PENDING_STATUS,
             "Intent reason": intent_reason or "Hiring signals from verified job boards",
@@ -211,7 +223,15 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
             except (TypeError, ValueError):
                 row_out["Open sales roles"] = 0
         rows.append(row_out)
-    return sanitize_enriched_dataframe(pd.DataFrame(rows))
+
+    df = pd.DataFrame(rows)
+    if apollo_contact_enrichment_available() and not df.empty:
+        merged = run_apollo_waterfall_on_dataframe(
+            df.to_dict(orient="records"),
+            on_progress=on_progress,
+        )
+        df = pd.DataFrame(merged)
+    return sanitize_enriched_dataframe(df)
 
 
 def lead_has_verified_contact(lead: pd.Series | dict) -> bool:

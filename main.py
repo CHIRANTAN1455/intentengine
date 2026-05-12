@@ -11,6 +11,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from apollo_enrichment import apollo_contact_enrichment_available
 from config import (
     BRAND,
     CORPUS_CA_JOB_SHARE,
@@ -24,6 +25,7 @@ from config import (
     REPLY_NOT_INTERESTED,
     REPLY_UNSUBSCRIBE,
     auto_save_pipeline_to_nocodb,
+    enrichment_max_companies_per_run,
 )
 from crm import (
     apply_blacklist_to_records,
@@ -890,13 +892,21 @@ elif st.session_state.step == 1:
 
 # --- STEP 2: ENRICHMENT ---
 elif st.session_state.step == 2:
+    _enrich_help = (
+        "Job-board signals (titles, URLs) always come from the live scrape. "
+        f"**Apollo is enabled** — up to **{enrichment_max_companies_per_run()}** companies per run get "
+        "Name / Email / decision-maker Title / LinkedIn / phone (when Apollo returns them) via search + "
+        "``people/match``; this uses your Apollo credits."
+        if apollo_contact_enrichment_available()
+        else (
+            "Job-board signals (titles, URLs) always come from the live scrape. "
+            "Set **APOLLO_API_KEY** (Apollo master API key) in environment or Streamlit secrets to "
+            f"auto-enrich up to **{enrichment_max_companies_per_run()}** companies per run with verified "
+            "sales contacts. Person fields stay empty until that key is present."
+        )
+    )
     st.markdown(
-        section_header(
-            "Enrichment",
-            "Job-board signals (posting titles, listing URLs, LinkedIn job pages when present) "
-            "are shown as-is. Person fields (Name / Email / Phone / LinkedIn profiles) stay empty "
-            "until you attach a verified contact source.",
-        ),
+        section_header("Enrichment", _enrich_help),
         unsafe_allow_html=True,
     )
     ready = _enrichment_queue_df()
@@ -927,31 +937,60 @@ elif st.session_state.step == 2:
             else:
                 with st.status("Enrichment", expanded=True) as enrich_status:
                     enrich_status.update(
-                        label=f"Preparing {len(ready_run)} companies (job signals + contact placeholders)…",
+                        label=f"Building job-signal rows for {len(ready_run)} companies…",
                         state="running",
                     )
+
+                    def _apollo_prog(cur: int, tot: int, co: str) -> None:
+                        enrich_status.update(
+                            label=f"Apollo contact lookup {cur}/{tot} — {co[:52]}",
+                            state="running",
+                        )
+
                     try:
-                        st.session_state.leads_enriched = waterfall_enrichment(ready_run)
+                        st.session_state.leads_enriched = waterfall_enrichment(
+                            ready_run,
+                            on_progress=_apollo_prog,
+                        )
                     except Exception as exc:
                         enrich_status.update(label=f"Enrichment failed: {exc}", state="error")
                         st.error(f"Enrichment failed. Details: {exc}")
                     else:
                         n_en = len(st.session_state.leads_enriched)
+                        n_ok = 0
+                        le = st.session_state.leads_enriched
+                        if isinstance(le, pd.DataFrame) and not le.empty and "Enrichment verified" in le.columns:
+                            n_ok = int(le["Enrichment verified"].astype(bool).sum())
                         enrich_status.update(state="complete")
-                        safe_toast(
-                            f"Enrichment complete — {n_en} compan(y/ies). Job titles and URLs are in the table.",
-                            icon="✅",
-                        )
+                        if apollo_contact_enrichment_available():
+                            safe_toast(
+                                f"Enrichment complete — {n_en} compan(y/ies), {n_ok} with verified Apollo contact.",
+                                icon="✅",
+                            )
+                        else:
+                            safe_toast(
+                                f"Enrichment complete — {n_en} compan(y/ies). Add APOLLO_API_KEY for person contacts.",
+                                icon="✅",
+                            )
                         _maybe_auto_save_nocodb("enrichment")
                         st.rerun()
     else:
-        st.success("Enrichment ready — job-derived fields are populated below.")
+        st.success("Enrichment ready — review the table below.")
         st.dataframe(st.session_state.leads_enriched, width="stretch", hide_index=True)
-        st.info(
-            "Name / Email / Phone stay empty until you add a **verified** person (CSV or provider). "
-            "**Title** is the open role from the job scrape (not a hiring manager name). "
-            "Dispatch still requires **Enrichment verified** + a real **Email**."
-        )
+        if apollo_contact_enrichment_available():
+            st.info(
+                "**Hiring role** is still the open posting line from job boards. **Title** shows the "
+                "decision-maker role from Apollo when a match was found. Dispatch requires "
+                "**Enrichment verified** + **Email** (Apollo fills these on hits). "
+                f"Only the first **{enrichment_max_companies_per_run()}** rows per run call Apollo — re-run "
+                "or raise **ENRICHMENT_MAX_COMPANIES** for larger batches."
+            )
+        else:
+            st.info(
+                "Add **APOLLO_API_KEY** to enable automatic Name / Email / phone / LinkedIn for sales "
+                f"contacts (up to **{enrichment_max_companies_per_run()}** companies per enrichment run). "
+                "Until then, only job-board columns are populated."
+            )
         if st.button(
             "Generate smart role-based email suggestions",
             width="stretch",

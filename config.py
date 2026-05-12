@@ -224,3 +224,31 @@ def get_nocodb_settings() -> NocoDBSettings:
         field_event_type=_read_env("NOCODB_FIELD_EVENT_TYPE", "event_type"),
         field_event_payload_json=_read_env("NOCODB_FIELD_EVENT_PAYLOAD_JSON", "payload_json"),
     )
+
+
+def apollo_api_key() -> str:
+    """Master API key for Apollo people search + match (optional)."""
+    return (_lookup_str("APOLLO_API_KEY", "") or "").strip()
+
+
+def apollo_phone_webhook_url() -> str:
+    """HTTPS webhook for Apollo async phone reveal (optional)."""
+    return (_lookup_str("APOLLO_PHONE_WEBHOOK_URL", "") or "").strip()
+
+
+def enrichment_max_companies_per_run() -> int:
+    """Max companies to call Apollo for per enrichment run (rate limit / credits)."""
+    raw = (_lookup_str("ENRICHMENT_MAX_COMPANIES", "50") or "50").strip()
+    try:
+        return max(1, min(int(raw), 200))
+    except ValueError:
+        return 50
+
+
+def enrichment_request_delay_seconds() -> float:
+    """Pause between Apollo calls to respect rate limits."""
+    raw = (_lookup_str("ENRICHMENT_REQUEST_DELAY_SECONDS", "0.35") or "0.35").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.35

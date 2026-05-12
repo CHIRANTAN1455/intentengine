@@ -58,7 +58,7 @@ def step_compileall() -> bool:
 
 def step_imports() -> bool:
     mods = [
-        "config", "llm_client", "enrichment", "email_engine", "crm",
+        "config", "llm_client", "enrichment", "apollo_enrichment", "email_engine", "crm",
         "internal_intent", "pipeline", "scoring", "intent_engine",
         "reply_classification", "role_suggestions", "outreach", "walego",
         "dashboard_metrics", "nocodb_client", "social_intent", "user_geo",
