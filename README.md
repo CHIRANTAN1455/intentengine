@@ -37,13 +37,37 @@ Run this command to open the IntentFlow dashboard in your web browser:
 streamlit run main.py
 ```
 
-Required providers in this build:
-- OpenRouter (email generation + reply classification)
-- Apify (jobs + social datasets)
-- Apollo + Hunter (contact enrichment waterfall)
-- AWS SES (email send)
-- HubSpot (CRM sync)
-- IMAP inbox (reply ingestion)
+Required / supported providers in this build:
+- **Anthropic Claude (direct API)** — primary LLM. Used for reply classification and (optional) email / role drafting.
+- **OpenAI (direct API)** — fallback LLM. Same role as Claude, used only when Claude is unreachable.
+- **python-jobspy** — live verified job listings from Indeed / LinkedIn (the only source of truth for intent).
+- **NocoDB** — session snapshots, dispatch + CRM event log.
+- **Verified contact provider** (Apollo / Hunter / ZoomInfo, etc.) — required before any dispatch will run.
+
+OpenRouter has been **removed** from the build. Both Anthropic and OpenAI are
+called via their official direct APIs using your paid keys.
+
+---
+
+## Production-safety policy (May 2026)
+
+This build is locked down for client safety:
+
+1. **Zero AI-generated contacts.** Name / Email / Phone / LinkedIn are only ever
+   populated by a verified provider. Until one is wired in, those fields stay
+   blank/null and the lead is marked `Awaiting verified contact`.
+2. **Only verified data sources are surfaced.** Job listings come from
+   `python-jobspy` (live Indeed/LinkedIn scrape). The previous synthetic
+   LLM-generated job-corpus fallback is gated behind
+   `ALLOW_SYNTHETIC_INTENT_CORPUS=1` and is **off** by default.
+3. **Dispatch is gated.** Outreach will only send for leads with
+   `Enrichment verified = true` **and** a non-empty `Email`. Everything else
+   is held with status `Awaiting verified contact` for SDR review.
+4. **Deterministic by default.** Email sequences and role suggestions render
+   from templates (no per-lead LLM call) so the pipeline is fast and never
+   hallucinates a recipient name. The LLM can be re-enabled for these via
+   `EMAIL_LLM_AUGMENT=1` / `ROLE_SUGGESTIONS_LLM=1` once a verified contact
+   pipeline is in place.
 
 ---
 
@@ -74,22 +98,23 @@ To see how the personalized emails look in an actual inbox:
 flowchart TB
   User([User — browser])
   User --> App[Streamlit · main.py]
-  App --> S0[1 Intent — corpus + scores]
+  App --> S0[1 Intent — live job boards]
   S0 --> S1[2 Scoring — tier gate]
-  S1 --> S2[3 Enrichment — contacts]
-  S2 --> S3[4 Outreach — sequences + NocoDB log + Walego]
+  S1 --> S2[3 Enrichment — verified contacts only]
+  S2 --> S3[4 Outreach — deterministic drafts + NocoDB log + Walego]
   S3 --> S4[5 Replies — classify]
   S4 --> S5[6 CRM — interested records]
   S5 --> S6[7 Data — dashboard]
   S6 --> Out([Review metrics])
 
-  OR[(OpenRouter)]
+  JS[(python-jobspy<br/>Indeed + LinkedIn)]
+  CL[(Claude API · primary)]
+  OA[(OpenAI · fallback)]
   DB[(NocoDB)]
 
-  OR -.->|corpus| S0
-  OR -.->|profiles| S2
-  OR -.->|drafts| S3
-  OR -.->|labels| S4
+  JS -.->|live job listings| S0
+  CL -.->|reply labels| S4
+  OA -.->|reply labels — fallback only| S4
 
   DB -.->|snapshots| App
   DB -.->|events| S3
@@ -110,6 +135,9 @@ User → Streamlit (main.py)
 
 Intent → Scoring → Enrich → Outreach → Replies → CRM → Dashboard
 
-OpenRouter: intent corpus · contact profiles · email drafts · reply labels
-NocoDB:     session snapshots · dispatch + events · CRM event log
+python-jobspy:  live Indeed/LinkedIn listings (the only intent source by default)
+Claude (direct): reply classification + optional email/role augmentation
+OpenAI (direct): fallback for the same tasks if Claude is unreachable
+NocoDB:          session snapshots · dispatch + events · CRM event log
+Verified provider (Apollo / Hunter / ZoomInfo): required for contacts before dispatch
 ```

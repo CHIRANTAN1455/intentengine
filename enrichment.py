@@ -1,32 +1,59 @@
-"""In-house enrichment: OpenRouter generates structured (fictional) contact profiles for drafting."""
+"""Contact enrichment — verified sources only.
+
+Policy (set by the client, May 2026):
+    * Zero AI-generated contacts.
+    * Surface contact fields only when they come from a verified provider
+      (Apollo, Hunter, ZoomInfo, etc.). Otherwise leave them blank/null.
+    * Job + company data (Company, Role, Job URL, etc.) is sourced from the
+      live job-board scrape and *is* verified — we keep it as-is.
+
+This module previously asked an LLM to invent a decision-maker per company.
+That logic is gone. Until a real verification provider is wired in, the
+enrichment step is effectively "carry through verified job-derived data and
+mark the contact as awaiting verification".
+"""
 
 from __future__ import annotations
 
-import hashlib
-import re
 import pandas as pd
 
-from openrouter_client import OpenRouterError, generate_enriched_contact_with_openrouter
+VERIFIED_CONTACT_PROVIDERS: tuple[str, ...] = ()  # populate when a provider is integrated
+
+# Status string surfaced on the lead + CRM row so SDRs immediately know that
+# the contact still needs a verified source before any outreach.
+CONTACT_PENDING_STATUS = "Awaiting verified contact"
 
 
-def _fallback_contact(company: str) -> dict[str, str]:
-    slug = re.sub(r"[^a-z0-9]+", "", company.lower())[:20] or "company"
-    h = int(hashlib.md5(company.encode("utf-8", errors="ignore")).hexdigest()[:8], 16)
-    first = ["Alex", "Sam", "Jordan", "Casey"][h % 4]
-    last = ["Rivera", "Patel", "Nguyen", "Brooks"][(h // 3) % 4]
-    return {
-        "first_name": first,
-        "last_name": last,
-        "title": "Head of Sales",
-        "email": f"{first.lower()}.{last.lower()}@{slug}.example.com",
-        "linkedin_url": "",
-        "phone": "",
-    }
+def _job_role_for_company(row: pd.Series) -> str:
+    """Return the verified open-role string from the scored row, if present."""
+    for key in ("Role", "Hiring role", "Title"):
+        if key in row and pd.notna(row.get(key)):
+            v = str(row.get(key) or "").strip()
+            if v:
+                return v
+    if "Open sales roles" in row and pd.notna(row.get("Open sales roles")):
+        try:
+            n = int(row.get("Open sales roles") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            return f"{n} open sales role(s)"
+    return ""
 
 
 def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
-    if company_or_leads.empty:
-        return company_or_leads
+    """Pass companies through the enrichment step with verified data only.
+
+    Output columns:
+        Name / Email / Phone / LinkedIn       -> blank until a verified provider fills them
+        Title (decision-maker title)          -> blank for the same reason
+        Hiring role (verified open role)      -> carried from the scraped posting
+        Company / Intent reason / tier / score -> carried through from scoring
+        Enrichment verified                   -> always False until a provider verifies
+        Contact status                        -> "Awaiting verified contact"
+    """
+    if company_or_leads is None or company_or_leads.empty:
+        return pd.DataFrame()
     if "Company" not in company_or_leads.columns:
         return company_or_leads
 
@@ -36,21 +63,19 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
         if not company:
             continue
         intent_reason = str(r.get("Intent reason", "") or "")
-        try:
-            c = generate_enriched_contact_with_openrouter(company, intent_reason)
-        except OpenRouterError:
-            c = _fallback_contact(company)
+        hiring_role = _job_role_for_company(r)
 
-        name = f"{c['first_name']} {c['last_name']}".strip()
         row_out: dict = {
-            "Name": name,
-            "Title": c.get("title", ""),
+            "Name": "",
+            "Title": "",
             "Company": company,
-            "Email": c.get("email", ""),
-            "Phone": c.get("phone", ""),
+            "Email": "",
+            "Phone": "",
             "LinkedIn": "",
+            "Hiring role": hiring_role,
             "Enrichment verified": False,
-            "Intent reason": intent_reason or "Hiring for sales; intent signals from in-house corpus",
+            "Contact status": CONTACT_PENDING_STATUS,
+            "Intent reason": intent_reason or "Hiring signals from verified job boards",
         }
         if "Intent tier" in company_or_leads.columns:
             row_out["Intent tier"] = str(r.get("Intent tier") or "")
@@ -61,3 +86,14 @@ def waterfall_enrichment(company_or_leads: pd.DataFrame) -> pd.DataFrame:
                 row_out["Intent score"] = 0.0
         rows.append(row_out)
     return pd.DataFrame(rows)
+
+
+def lead_has_verified_contact(lead: pd.Series | dict) -> bool:
+    """True only when a real verification provider has confirmed the contact."""
+    if isinstance(lead, pd.Series):
+        verified = bool(lead.get("Enrichment verified"))
+        email = str(lead.get("Email") or "").strip()
+    else:
+        verified = bool(lead.get("Enrichment verified"))
+        email = str(lead.get("Email") or "").strip()
+    return verified and bool(email)

@@ -55,7 +55,7 @@ def step_imports() -> bool:
 
         for name in (
             "nocodb_client",
-            "openrouter_client",
+            "llm_client",
             "user_geo",
             "pipeline",
             "enrichment",
@@ -65,7 +65,7 @@ def step_imports() -> bool:
         log("Imports", "FAIL", f"{exc!r}")
         traceback.print_exc()
         return False
-    log("Imports", "PASS", "config, nocodb_client, openrouter_client, user_geo, pipeline, enrichment")
+    log("Imports", "PASS", "config, nocodb_client, llm_client, user_geo, pipeline, enrichment")
     return True
 
 
@@ -82,15 +82,9 @@ def step_ip_api() -> bool:
 
 def step_llm() -> bool:
     try:
-        from openrouter_client import chat_completion
-        from config import get_openrouter_settings
-
-        get_openrouter_settings()
-    except RuntimeError as exc:
-        log("LLM (OpenRouter / order in LLM_PROVIDER_ORDER)", "SKIP", str(exc))
-        return True
+        from llm_client import LLMError, chat_completion
     except Exception as exc:
-        log("LLM settings", "FAIL", str(exc))
+        log("LLM client import", "FAIL", str(exc))
         return False
 
     try:
@@ -99,15 +93,19 @@ def step_llm() -> bool:
             0.0,
             task="default",
         ).strip()
-        if "pong" in out.lower():
-            log("LLM chat completion", "PASS", out[:120])
-            return True
-        log("LLM chat completion", "FAIL", f"unexpected reply: {out[:200]!r}")
-        return False
+    except LLMError as exc:
+        log("LLM chat completion (Claude / OpenAI)", "SKIP", str(exc))
+        return True
     except Exception as exc:
-        log("LLM chat completion", "FAIL", str(exc))
+        log("LLM chat completion (Claude / OpenAI)", "FAIL", str(exc))
         traceback.print_exc()
         return False
+
+    if "pong" in out.lower():
+        log("LLM chat completion (Claude / OpenAI)", "PASS", out[:120])
+        return True
+    log("LLM chat completion (Claude / OpenAI)", "FAIL", f"unexpected reply: {out[:200]!r}")
+    return False
 
 
 def _nocodb_table_id_placeholder(table_id: str) -> bool:

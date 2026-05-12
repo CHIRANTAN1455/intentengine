@@ -1,4 +1,4 @@
-"""Role-based outreach strategy suggestions (OpenRouter + fallbacks)."""
+"""Role-based outreach strategy suggestions (deterministic by default; optional LLM)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Union
 
 import pandas as pd
 
-from config import HIREQUITY_TONE
-from openrouter_client import OpenRouterError, suggest_role_strategy_with_openrouter
+from config import HIREQUITY_TONE, role_suggestions_llm_enabled
+from llm_client import LLMError, suggest_role_strategy_with_llm
 
 
 def _fallback_role_strategy(role: str) -> dict[str, str]:
@@ -52,11 +52,15 @@ def role_based_suggestions(leads: Any) -> Any:
         return pd.DataFrame(columns=["Role", "Count", "Angle", "Value proposition", "CTA", "Subject hook"])
     rows: List[Dict[str, Union[str, int]]] = []
     grouped = leads[role_col].fillna("Unknown role").astype(str).value_counts()
+    llm_on = role_suggestions_llm_enabled()
     for role, count in grouped.items():
         ctx = {"role": role, "lead_count": str(count), "campaign_tone": HIREQUITY_TONE}
-        try:
-            strat = suggest_role_strategy_with_openrouter(ctx)
-        except OpenRouterError:
+        if llm_on:
+            try:
+                strat = suggest_role_strategy_with_llm(ctx)
+            except LLMError:
+                strat = _fallback_role_strategy(role)
+        else:
             strat = _fallback_role_strategy(role)
         rows.append(
             {

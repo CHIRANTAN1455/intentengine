@@ -31,6 +31,45 @@ def _lookup_str(name: str, default: str | None = None) -> str | None:
 BRAND = "hirequity"
 PRODUCT = "Intent Outbound Engine"
 
+# --- Production-safety flags ------------------------------------------------
+# Hard rule: never invent contact data. Enrichment must only surface verified
+# contact fields (Name / Email / Phone / LinkedIn) or leave them blank/null.
+# This constant is the *policy*; code paths that previously called the LLM to
+# fabricate contact rows are removed. The flag is here for documentation +
+# anyone who imports it can read the current stance from one place.
+CONTACT_FABRICATION_DISABLED = True
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def allow_synthetic_intent_corpus() -> bool:
+    """Allow LLM-generated job listings as a fallback when live boards are empty.
+
+    Defaults to OFF (production-safe) so the pipeline never surfaces fabricated
+    company / job rows. Operators can opt in with ALLOW_SYNTHETIC_INTENT_CORPUS=1
+    for local sandbox runs only.
+    """
+    return _truthy(_lookup_str("ALLOW_SYNTHETIC_INTENT_CORPUS", "0"))
+
+
+def email_llm_augment_enabled() -> bool:
+    """Use the LLM to draft outreach sequences. Default OFF for latency + safety
+    (deterministic templates render instantly and never hallucinate names)."""
+    return _truthy(_lookup_str("EMAIL_LLM_AUGMENT", "0"))
+
+
+def role_suggestions_llm_enabled() -> bool:
+    """Use the LLM for role-strategy suggestions. Default OFF for latency."""
+    return _truthy(_lookup_str("ROLE_SUGGESTIONS_LLM", "0"))
+
+
+def reply_classifier_llm_enabled() -> bool:
+    """Use the LLM for reply classification. Default ON because per-reply cost
+    is small and quality matters; operators can disable for offline runs."""
+    return _truthy(_lookup_str("REPLY_CLASSIFIER_LLM", "1"))
+
 # Job boards we aggregate (V1: mock or adapter pluggable; real scrapers go behind these flags)
 JOB_SOURCES = ("linkedin_jobs", "indeed", "glassdoor")
 LIVE_JOB_SITES = ("indeed", "linkedin")
@@ -102,6 +141,9 @@ LEAD_STATUS_REPLIED = "Replied"
 LEAD_STATUS_MANUAL_RECOMMENDED = "Manual outreach recommended"
 LEAD_STATUS_HIGH_INTENT_REVIEW = "High intent — paused for SDR review"
 LEAD_STATUS_DNC = "Do not contact"
+# Contact has not been verified by an external provider yet. Sequence is held
+# until a real Email / Name / Phone is filled in by a verified source.
+LEAD_STATUS_AWAITING_VERIFIED_CONTACT = "Awaiting verified contact"
 
 OUTREACH_LOCK_ACTIVE = "Active"
 OUTREACH_LOCK_RELEASED = "Released"
@@ -128,16 +170,6 @@ class AppSettings:
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
-
-
-@dataclass(frozen=True)
-class OpenRouterSettings:
-    api_key: str
-    model: str
-    base_url: str
-    http_referer: str
-    app_title: str
-    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -172,22 +204,6 @@ def _read_optional_env(name: str, default: str = "") -> str:
 
 def get_app_settings() -> AppSettings:
     return AppSettings(app_env=_read_env("APP_ENV", "development"))
-
-
-def get_openrouter_settings() -> OpenRouterSettings:
-    timeout_raw = _read_env("OPENROUTER_TIMEOUT_SECONDS", "25")
-    try:
-        timeout_seconds = int(timeout_raw)
-    except ValueError as exc:
-        raise RuntimeError("OPENROUTER_TIMEOUT_SECONDS must be an integer.") from exc
-    return OpenRouterSettings(
-        api_key=_read_env("OPENROUTER_API_KEY"),
-        model=_read_env("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
-        base_url=_read_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-        http_referer=_read_env("OPENROUTER_HTTP_REFERER", "https://intentengine.local"),
-        app_title=_read_env("OPENROUTER_APP_TITLE", PRODUCT),
-        timeout_seconds=timeout_seconds,
-    )
 
 
 def auto_save_pipeline_to_nocodb() -> bool:

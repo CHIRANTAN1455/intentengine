@@ -1,4 +1,4 @@
-"""NocoDB REST client for pipeline persistence (OpenRouter + in-house stack)."""
+"""NocoDB REST client for pipeline persistence."""
 
 from __future__ import annotations
 

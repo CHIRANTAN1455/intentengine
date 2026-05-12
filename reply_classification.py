@@ -6,22 +6,28 @@ from __future__ import annotations
 
 import re
 
-from config import REPLY_INTERESTED, REPLY_NOT_INTERESTED, REPLY_UNSUBSCRIBE
-from openrouter_client import OpenRouterError, classify_reply_with_openrouter
+from config import (
+    REPLY_INTERESTED,
+    REPLY_NOT_INTERESTED,
+    REPLY_UNSUBSCRIBE,
+    reply_classifier_llm_enabled,
+)
+from llm_client import LLMError, classify_reply_with_llm
 
 
 def classify_reply_text(text: str) -> str:
-    try:
-        label = classify_reply_with_openrouter(text)
-        if label == "Interested":
-            return REPLY_INTERESTED
-        if label == "Not interested":
-            return REPLY_NOT_INTERESTED
-        if label == "Unsubscribe":
-            return REPLY_UNSUBSCRIBE
-    except OpenRouterError:
-        # Fallback keeps pipeline working during transient provider issues.
-        pass
+    if reply_classifier_llm_enabled():
+        try:
+            label = classify_reply_with_llm(text)
+            if label == "Interested":
+                return REPLY_INTERESTED
+            if label == "Not interested":
+                return REPLY_NOT_INTERESTED
+            if label == "Unsubscribe":
+                return REPLY_UNSUBSCRIBE
+        except LLMError:
+            # Fallback keeps pipeline working during transient provider issues.
+            pass
 
     t = (text or "").strip().lower()
     if not t:

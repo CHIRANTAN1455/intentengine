@@ -15,6 +15,7 @@ from config import (
     CRM_TOUCHES_BEFORE_MANUAL_CALL,
     CRM_STATUSES,
     HIGH_INTENT_SDR_PAUSE_SCORE,
+    LEAD_STATUS_AWAITING_VERIFIED_CONTACT,
     LEAD_STATUS_DNC,
     LEAD_STATUS_HIGH_INTENT_REVIEW,
     LEAD_STATUS_IN_SEQUENCE,
@@ -40,8 +41,32 @@ def _email_key(rec: dict[str, Any]) -> str:
     return str(rec.get("email") or "").strip().lower()
 
 
+def _dedup_key(rec: dict[str, Any]) -> str:
+    """Stable dedup key. Prefer email; fall back to company so that leads
+    without a verified email still merge cleanly across re-runs."""
+    em = _email_key(rec)
+    if em:
+        return f"email:{em}"
+    co = str(rec.get("company") or "").strip().lower()
+    if co:
+        return f"company:{co}"
+    rid = str(rec.get("id") or "").strip().lower()
+    if rid:
+        return f"id:{rid}"
+    return ""
+
+
 def _by_email(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {_email_key(r): r for r in records if _email_key(r)}
+
+
+def _by_key(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for r in records:
+        k = _dedup_key(r)
+        if k:
+            out[k] = r
+    return out
 
 
 def _log_line(msg: str) -> str:
@@ -78,7 +103,12 @@ def seed_post_enrich_row(
 ) -> dict[str, Any]:
     """
     After enrich → CRM: queued for automation; SDR visible but must not manually touch yet.
-    High intent (score) → sequence paused for SDR review (Scenario C).
+
+    Behaviour:
+        * High intent (score) → sequence paused for SDR review (Scenario C).
+        * No verified email → sequence paused as "Awaiting verified contact"
+          (Scenario D, added when AI-generated contacts were removed).
+        * Otherwise → queued, automation coordinates first touches.
     """
     score = 0.0
     if "Intent score" in lead.index and pd.notna(lead.get("Intent score")):
@@ -87,48 +117,66 @@ def seed_post_enrich_row(
         except (TypeError, ValueError):
             score = 0.0
 
+    email_addr = str(lead.get("Email", "") or "").strip()
+    enrichment_verified = bool(lead.get("Enrichment verified"))
+    contact_verified = enrichment_verified and bool(email_addr)
     high_hold = score >= HIGH_INTENT_SDR_PAUSE_SCORE
-    if high_hold:
+
+    if not contact_verified:
+        lead_status = LEAD_STATUS_AWAITING_VERIFIED_CONTACT
+        sequence_status = "Paused — awaiting verified contact source"
+        sdr_next = (
+            "No verified contact yet. Provide a real Email / Name from a verified "
+            "data source before the sequence will run."
+        )
+        seq_paused = True
+        manual_ok = False
+        log = _log_line("CRM: created post-enrich — awaiting verified contact (sequence paused).")
+    elif high_hold:
         lead_status = LEAD_STATUS_HIGH_INTENT_REVIEW
         sequence_status = SEQUENCE_PAUSED_HIGH_INTENT
         sdr_next = "High-intent lead: review now. Automated sequence paused until SDR clears."
         seq_paused = True
+        manual_ok = True
         log = _log_line("CRM: created post-enrich — high intent hold (sequence paused).")
     else:
         lead_status = LEAD_STATUS_QUEUED
         sequence_status = SEQUENCE_PENDING
         sdr_next = "Do not manually touch yet — automation coordinates first touches."
         seq_paused = False
+        manual_ok = False
         log = _log_line("CRM: created post-enrich — queued for outreach (lock active).")
 
     hist_parts = [log]
     if interaction_log:
         hist_parts.append(interaction_log)
     li = str(lead.get("LinkedIn", "") or "").strip()
-    if not bool(lead.get("Enrichment verified")):
+    if not enrichment_verified:
         li = ""
     return {
         "id": _id_for(lead),
-        "name": str(lead.get("Name", "")),
-        "company": str(lead.get("Company", "")),
-        "email": str(lead.get("Email", "")),
+        "name": str(lead.get("Name", "") or ""),
+        "company": str(lead.get("Company", "") or ""),
+        "email": email_addr,
         "linkedin": li,
-        "phone": str(lead.get("Phone", "")),
-        "intent_reason": str(lead.get("Intent reason", "")),
+        "phone": str(lead.get("Phone", "") or "") if enrichment_verified else "",
+        "intent_reason": str(lead.get("Intent reason", "") or ""),
         "intent_score": score,
         "intent_tier": str(lead.get("Intent tier", "") or ""),
+        "hiring_role": str(lead.get("Hiring role", "") or ""),
         "lead_status": lead_status,
-        "outreach_lock": OUTREACH_LOCK_ACTIVE,
+        "outreach_lock": OUTREACH_LOCK_ACTIVE if contact_verified else OUTREACH_LOCK_RELEASED,
         "assigned_sdr": (assigned_sdr or "").strip() or "Unassigned",
         "sequence_status": sequence_status,
         "sequence_paused": seq_paused,
         "touches_sent": 0,
         "sdr_next_action": sdr_next,
-        "sdr_manual_allowed": high_hold,
+        "sdr_manual_allowed": manual_ok,
         "call_task_created": False,
         "interaction_history": " | ".join(hist_parts),
         "deal_status": "Pipeline",
         "status": "Pipeline",
+        "enrichment_verified": enrichment_verified,
         "pushed_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -141,11 +189,18 @@ def seed_crm_from_enriched(
     out: list[dict[str, Any]] = []
     if leads is None or leads.empty:
         return out
+    seen_keys: set[str] = set()
     for _, lead in leads.iterrows():
         em = str(lead.get("Email") or "").strip().lower()
         if em and em in blacklist:
             continue
-        out.append(seed_post_enrich_row(lead, assigned_sdr=assigned_sdr))
+        row = seed_post_enrich_row(lead, assigned_sdr=assigned_sdr)
+        key = _dedup_key(row)
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        out.append(row)
     return out
 
 
@@ -276,15 +331,19 @@ def merge_seed_with_existing(
     existing: list[dict[str, Any]],
     seeded: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Prefer existing row if same email (re-run safe)."""
-    by_e = _by_email(existing)
+    """Prefer existing row if same email/company (re-run safe).
+
+    Falls back to company-based dedup when email is missing so blank-contact
+    rows do not get duplicated across re-runs.
+    """
+    by_k = _by_key(existing)
     for row in seeded:
-        k = _email_key(row)
+        k = _dedup_key(row)
         if not k:
             continue
-        if k not in by_e:
-            by_e[k] = row
-    return list(by_e.values())
+        if k not in by_k:
+            by_k[k] = row
+    return list(by_k.values())
 
 
 def apply_blacklist_to_records(
@@ -318,6 +377,7 @@ CRM_DF_COLUMNS: tuple[str, ...] = (
     "email",
     "linkedin",
     "phone",
+    "hiring_role",
     "intent_reason",
     "intent_score",
     "intent_tier",
@@ -333,6 +393,7 @@ CRM_DF_COLUMNS: tuple[str, ...] = (
     "interaction_history",
     "deal_status",
     "status",
+    "enrichment_verified",
     "pushed_at",
 )
 
