@@ -30,6 +30,21 @@ _CORPUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CORPUS_MAX_FETCH_THREADS = 3
 _CORPUS_FETCH_ATTEMPTS = 3
 
+# When LinkedIn returns 429 ("too many requests"), every subsequent jobspy call
+# on this process retries LinkedIn for ~60s before failing. Track a soft cooloff
+# so we skip LinkedIn entirely for a short window and rely on Indeed.
+_LINKEDIN_COOLOFF_UNTIL: float = 0.0
+_LINKEDIN_COOLOFF_SECONDS = 10 * 60
+
+
+def _linkedin_in_cooloff() -> bool:
+    return time.time() < _LINKEDIN_COOLOFF_UNTIL
+
+
+def _trip_linkedin_cooloff() -> None:
+    global _LINKEDIN_COOLOFF_UNTIL
+    _LINKEDIN_COOLOFF_UNTIL = time.time() + _LINKEDIN_COOLOFF_SECONDS
+
 
 def invalidate_intent_corpus_cache() -> None:
     global _CORPUS_CACHE
@@ -191,8 +206,13 @@ def _run_jobspy_query(
         from jobspy import scrape_jobs
     except Exception:
         return []
+    # When LinkedIn just 429'd, drop it from the site list so jobspy doesn't burn
+    # ~60s retrying LinkedIn before falling through to Indeed.
+    sites = [s for s in LIVE_JOB_SITES if not (_linkedin_in_cooloff() and s == "linkedin")]
+    if not sites:
+        sites = ["indeed"]
     kwargs: dict[str, Any] = {
-        "site_name": list(LIVE_JOB_SITES),
+        "site_name": sites,
         "search_term": role_query,
         "location": location,
         "results_wanted": max(wanted, 20),
@@ -204,7 +224,10 @@ def _run_jobspy_query(
             df = scrape_jobs(**kwargs, linkedin_fetch_description=True)
         except TypeError:
             df = scrape_jobs(**kwargs)
-    except Exception:
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "429" in msg or "too many" in msg or "linkedin" in msg:
+            _trip_linkedin_cooloff()
         return []
     if df is None or len(df) == 0:
         return []

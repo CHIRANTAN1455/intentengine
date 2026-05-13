@@ -846,8 +846,8 @@ if not st.session_state.get("client_landing_dismissed"):
         "the first batch is often already on the board.</p>",
         unsafe_allow_html=True,
     )
-    _maybe_start_client_intent_prefetch()
-    _client_welcome_background_fragment()
+    # Buttons rendered FIRST and unconditionally so they never get hidden by the
+    # progress fragment's tick (some Streamlit Cloud workers used to flash them).
     c_enter, c_skip, c_hint = st.columns([1.05, 1.15, 1.8])
     with c_enter:
         if st.button("Enter command center", type="primary", width="stretch", key="hq_landing_enter"):
@@ -860,6 +860,8 @@ if not st.session_state.get("client_landing_dismissed"):
             st.rerun()
     with c_hint:
         st.caption("Stay a few seconds for the shimmer — your pipeline is already spinning up.")
+    _maybe_start_client_intent_prefetch()
+    _client_welcome_background_fragment()
     st.stop()
 
 _ensure_intent()
