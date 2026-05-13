@@ -20,7 +20,12 @@ from config import (
 )
 from llm_client import LLMError, generate_intent_corpus_with_llm
 
-# Per–geo-hint cache (15 min) so different viewers do not share the wrong region.
+# Per–geo-hint cache so different viewers do not share the wrong region.
+# Short TTL on purpose: identical fetches across many devices in a row used to
+# repeat the same listings for 15 min; now we keep the cache only long enough
+# to absorb a single user's reload burst, not a multi-device demo.
+_CORPUS_CACHE_TTL_SECONDS_OK = 180
+_CORPUS_CACHE_TTL_SECONDS_EMPTY = 30
 _CORPUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CORPUS_MAX_FETCH_THREADS = 3
 _CORPUS_FETCH_ATTEMPTS = 3
@@ -266,7 +271,7 @@ def _get_corpus(geo_hint: dict[str, Any] | None = None) -> dict[str, Any]:
                 if len(list(corpus.get("jobs", []) or [])) >= INTENT_CORPUS_MIN_JOBS:
                     break
     job_n = len(list(corpus.get("jobs", []) or []))
-    ttl = 15 * 60 if job_n > 0 else 45
+    ttl = _CORPUS_CACHE_TTL_SECONDS_OK if job_n > 0 else _CORPUS_CACHE_TTL_SECONDS_EMPTY
     _CORPUS_CACHE[key] = (now + ttl, corpus)
     return corpus
 
@@ -349,7 +354,7 @@ def fetch_job_postings_stream(
                     break
 
     job_n = len(list(corpus.get("jobs", []) or []))
-    ttl = 15 * 60 if job_n > 0 else 45
+    ttl = _CORPUS_CACHE_TTL_SECONDS_OK if job_n > 0 else _CORPUS_CACHE_TTL_SECONDS_EMPTY
     _CORPUS_CACHE[key] = (now + ttl, corpus)
     jobs = _enforce_country_priority_mix(list(corpus.get("jobs", []) or []))
     return pd.DataFrame(_job_rows_from_raw_jobs(jobs))

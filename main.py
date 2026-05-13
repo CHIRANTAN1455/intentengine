@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -121,9 +122,32 @@ def safe_toast(message: str, *, icon: str | None = None) -> None:
         except Exception:
             pass
 
+def _make_session_id() -> str:
+    """Per-browser session id so devices don't share the same NocoDB snapshot.
+
+    Honors ``?sid=...`` in the URL so links can resume a specific session;
+    otherwise generates a short random id (``sess-<8-hex>``) the first time
+    this script runs in the browser.
+    """
+    try:
+        qp = st.query_params  # type: ignore[attr-defined]
+        sid_qp = qp.get("sid", "")
+        if isinstance(sid_qp, list):
+            sid_qp = sid_qp[0] if sid_qp else ""
+        sid_qp = str(sid_qp).strip()
+        if sid_qp:
+            return sid_qp
+    except Exception:
+        pass
+    return f"sess-{uuid.uuid4().hex[:8]}"
+
+
 # Session defaults
 if "session_id" not in st.session_state:
-    st.session_state.session_id = "default"
+    st.session_state.session_id = _make_session_id()
+    # Mark this as a fresh, auto-generated session so the bootstrap step
+    # does NOT pull a stale snapshot tied to some other browser/device.
+    st.session_state._session_is_fresh = True
 if "step" not in st.session_state:
     st.session_state.step = 0
 if "company_jobs" not in st.session_state:
@@ -493,6 +517,12 @@ def _maybe_auto_save_nocodb(reason: str) -> None:
 def _hydrate_from_nocodb() -> None:
     if st.session_state.nocodb_hydrated:
         return
+    # Fresh auto-generated sessions have nothing to hydrate from and must NOT
+    # accidentally inherit another device's snapshot via the legacy "default"
+    # session id. Only hydrate when the user explicitly asked for a session id.
+    if st.session_state.get("_session_is_fresh"):
+        st.session_state.nocodb_hydrated = True
+        return
     try:
         rid, row = find_snapshot_by_session(st.session_state.session_id)
     except NocoDBError:
@@ -668,7 +698,12 @@ with st.sidebar:
     )
 
     def _apply_session():
-        st.session_state.session_id = (st.session_state.session_id_in or "default").strip()
+        new_sid = (st.session_state.session_id_in or "").strip()
+        if not new_sid:
+            new_sid = _make_session_id()
+        st.session_state.session_id = new_sid
+        # User explicitly typed/loaded this id → allow NocoDB hydration to run.
+        st.session_state._session_is_fresh = False
         st.session_state.nocodb_hydrated = False
         st.session_state._native_session_bootstrap_done = False
         st.session_state.client_landing_dismissed = False
@@ -775,11 +810,31 @@ with st.sidebar:
         st.session_state.blacklist = set()
         st.session_state.outreach_simulated = False
         st.session_state.replies_built = False
-        st.session_state.session_id = "default"
-        st.session_state.session_id_in = "default"
+        new_sid = _make_session_id()
+        st.session_state.session_id = new_sid
+        st.session_state.session_id_in = new_sid
+        st.session_state._session_is_fresh = True
         st.session_state.nocodb_hydrated = False
         st.session_state._native_session_bootstrap_done = False
         st.session_state.max_job_age_days = MAX_JOB_POSTING_AGE_DAYS
+        invalidate_intent_corpus_cache()
+        st.rerun()
+
+    if st.button(
+        "Force fresh live fetch",
+        width="stretch",
+        help="Bypass the in-memory job-board cache and re-pull from Indeed / LinkedIn now. "
+        "Use when multiple devices appear to see the same listings.",
+    ):
+        invalidate_intent_corpus_cache()
+        st.session_state.company_jobs = None
+        st.session_state.company_scored = None
+        st.session_state._intent_prefetch_submitted = False
+        st.session_state.pop("_intent_prefetch_future", None)
+        st.session_state.pop("_intent_prefetch_ready", None)
+        st.session_state.pop("_prefetch_ready_toast_shown", None)
+        st.session_state.pop("_intent_prefetch_error", None)
+        safe_toast("Live job-board cache cleared — next fetch will hit Indeed / LinkedIn directly.", icon="🔄")
         st.rerun()
 
 # --- Client welcome (first screen): animated landing + background intent prefetch ---
