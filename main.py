@@ -11,7 +11,11 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from apollo_enrichment import apollo_contact_enrichment_available
+from apollo_enrichment import (
+    apollo_contact_enrichment_available,
+    apollo_last_error,
+    apollo_quick_probe,
+)
 from config import (
     BRAND,
     CORPUS_CA_JOB_SHARE,
@@ -720,6 +724,26 @@ with st.sidebar:
             st.session_state.pop("_intent_prefetch_error", None)
             st.rerun()
 
+    st.markdown("---")
+    if apollo_contact_enrichment_available():
+        st.success("Apollo: key detected", icon="🟢")
+    else:
+        st.warning("Apollo: no key (set APOLLO_API_KEY)", icon="🟡")
+    if st.button("Test Apollo connectivity", width="stretch"):
+        ok, msg = apollo_quick_probe()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+    le_now = st.session_state.get("leads_enriched")
+    if isinstance(le_now, pd.DataFrame) and not le_now.empty and "Enrichment verified" in le_now.columns:
+        n_ok = int(le_now["Enrichment verified"].astype(bool).sum())
+        n_tot = len(le_now)
+        st.caption(f"Enriched rows verified by Apollo: **{n_ok} / {n_tot}**")
+    last_err = apollo_last_error()
+    if last_err:
+        st.caption(f"Last Apollo error: {last_err[:180]}")
+
     if st.button("Save pipeline to NocoDB", width="stretch"):
         try:
             _save_to_nocodb()
@@ -1053,11 +1077,20 @@ elif st.session_state.step == 3:
         unverified_total = int((~le.apply(lead_has_verified_contact, axis=1)).sum()) if not le.empty else 0
         verified_total = len(le) - unverified_total if not le.empty else 0
         if unverified_total:
-            st.warning(
-                f"{unverified_total} lead(s) have no verified contact and will be **held** "
-                "from dispatch. Plug in a verified provider (Apollo / Hunter / ZoomInfo) "
-                "or import a CSV with confirmed contacts before they will be sent."
-            )
+            if apollo_contact_enrichment_available():
+                hint = (
+                    f"{unverified_total} lead(s) have no verified contact. Apollo is enabled but "
+                    "either it didn't have a match for these companies, or **enrichment was run "
+                    "before the key was set**. Go back to **Enrichment**, click **Clear stale "
+                    "enriched contacts** in the sidebar, then **Execute enrichment** again."
+                )
+            else:
+                hint = (
+                    f"{unverified_total} lead(s) have no verified contact and will be **held** "
+                    "from dispatch. Plug in a verified provider (Apollo / Hunter / ZoomInfo) "
+                    "or import a CSV with confirmed contacts before they will be sent."
+                )
+            st.warning(hint)
         st.caption(
             f"Dispatch will run for **{verified_total}** verified lead(s). "
             "Drafts are still rendered below for every row so SDRs can review the messaging."

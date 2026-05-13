@@ -1,5 +1,10 @@
 """Apollo.io contact enrichment (real people + work emails).
 
+Also exposes :data:`LAST_APOLLO_ERROR` so the Streamlit UI can show the
+first HTTP/connection error seen on the most recent enrichment run, plus
+:func:`apollo_quick_probe` for a sidebar “Test Apollo key” button.
+
+
 This replaces the earlier “LLM-invented contact” path: every surfaced email /
 name / phone / LinkedIn profile here comes from Apollo’s database + their
 ``people/match`` reveal flow (consumes Apollo credits per your plan).
@@ -29,6 +34,49 @@ from config import (
 )
 
 _APOLLO_BASE = "https://api.apollo.io/api/v1"
+
+# Last error seen during an Apollo call on this Python process (debug aid).
+LAST_APOLLO_ERROR: str = ""
+
+
+def _set_last_error(msg: str) -> None:
+    global LAST_APOLLO_ERROR
+    LAST_APOLLO_ERROR = msg
+
+
+def apollo_last_error() -> str:
+    return LAST_APOLLO_ERROR
+
+
+def apollo_quick_probe() -> tuple[bool, str]:
+    """Single low-cost POST to confirm the key works. Returns (ok, message)."""
+    if not apollo_contact_enrichment_available():
+        return False, "APOLLO_API_KEY is not set in env or Streamlit secrets."
+    try:
+        r = requests.post(
+            f"{_APOLLO_BASE}/mixed_people/api_search",
+            headers=_headers(),
+            json={"q_organization_name": "Apollo", "page": 1, "per_page": 1},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return False, f"Network error: {exc}"
+    if r.status_code in (401, 403):
+        return False, f"HTTP {r.status_code}: key rejected. Use a master API key (Apollo → Settings → API)."
+    if r.status_code == 422:
+        return False, f"HTTP 422 from Apollo: {r.text[:240]}"
+    if r.status_code >= 400:
+        return False, f"HTTP {r.status_code}: {r.text[:240]}"
+    try:
+        body = r.json()
+    except ValueError:
+        return False, "Apollo returned non-JSON response."
+    people = body.get("people")
+    if isinstance(people, list):
+        return True, f"OK — Apollo responded with {len(people)} sample row(s)."
+    return True, "OK — Apollo responded (no rows for probe query)."
+
+
 _SALES_TITLE_HINTS = (
     "sales",
     "revenue",
@@ -161,13 +209,16 @@ def fetch_apollo_contact_for_company(
             json=body,
             timeout=timeout,
         )
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        _set_last_error(f"search network error: {exc}")
         return None
     if r.status_code >= 400:
+        _set_last_error(f"search HTTP {r.status_code}: {r.text[:200]}")
         return None
     try:
         data = r.json()
     except ValueError:
+        _set_last_error("search response was not JSON")
         return None
     people = data.get("people")
     if not isinstance(people, list) or not people:
@@ -195,13 +246,16 @@ def fetch_apollo_contact_for_company(
             params=params,
             timeout=timeout,
         )
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        _set_last_error(f"match network error: {exc}")
         return None
     if r2.status_code >= 400:
+        _set_last_error(f"match HTTP {r2.status_code}: {r2.text[:200]}")
         return None
     try:
         mdata = r2.json()
     except ValueError:
+        _set_last_error("match response was not JSON")
         return None
     person = mdata.get("person")
     if not isinstance(person, dict):
@@ -234,6 +288,7 @@ def run_apollo_waterfall_on_dataframe(
     """Augment in-memory enrichment row dicts with Apollo contacts (bounded batch)."""
     if not apollo_contact_enrichment_available():
         return df_rows
+    _set_last_error("")
     delay = enrichment_request_delay_seconds()
     cap = enrichment_max_companies_per_run()
     total = min(len(df_rows), cap)
