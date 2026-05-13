@@ -402,9 +402,16 @@ def _drain_prefetch_future_blocking() -> None:
     st.session_state.pop("_intent_prefetch_error", None)
 
 
-@st.fragment(run_every=timedelta(seconds=0.42))
+@st.fragment(run_every=timedelta(seconds=1.0))
 def _client_welcome_background_fragment() -> None:
-    """Polls prefetch completion and animates native progress while the welcome screen is visible."""
+    """Polls prefetch completion + animates progress while the welcome screen is visible.
+
+    Streamlit logs a benign ``fragment ... does not exist anymore`` line when a
+    polling tick fires after a parent ``st.rerun()`` removed the fragment.
+    Slower cadence (1s) + an early bail-out as soon as the landing page is
+    dismissed or the snapshot is ready keeps that log noise low without
+    sacrificing the “loading…” feedback.
+    """
     if st.session_state.get("client_landing_dismissed"):
         return
     merged = _try_merge_prefetch_future()
@@ -415,7 +422,8 @@ def _client_welcome_background_fragment() -> None:
     fut = st.session_state.get("_intent_prefetch_future")
     if st.session_state.get("_intent_prefetch_ready"):
         prog_slot.progress(1.0, text="Intent snapshot ready")
-    elif fut is not None and not fut.done():
+        return
+    if fut is not None and not fut.done():
         pulse = 0.18 + 0.72 * (0.5 + 0.5 * math.sin(time.monotonic() * 2.05))
         prog_slot.progress(min(0.94, pulse), text="Fetching listings & scores in the background…")
     elif st.session_state.get("_intent_prefetch_error"):
@@ -648,7 +656,7 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    st.text_input("Session id", value=st.session_state.session_id, key="session_id_in")
+    st.text_input("Session id", key="session_id_in")
     st.text_input(
         "Assigned SDR (CRM visibility)",
         key="assigned_sdr_label",
