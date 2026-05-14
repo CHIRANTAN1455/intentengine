@@ -73,7 +73,7 @@ from ui_theme import (
 )
 from walego import handoff_to_walego
 
-from hubspot_sync import push_crm_batch
+from hubspot_sync import push_crm_batch, push_enriched_dataframe_to_hubspot
 
 
 def _email_to_enriched_lead(le: pd.DataFrame | None) -> dict[str, dict[str, Any]]:
@@ -1107,17 +1107,80 @@ elif st.session_state.step == 2:
         if st.session_state.role_suggestions is not None:
             st.markdown("**Smart personalization suggestions (by enriched role)**")
             st.dataframe(st.session_state.role_suggestions, width="stretch", hide_index=True)
+        le_hs = st.session_state.leads_enriched
+        if isinstance(le_hs, pd.DataFrame) and not le_hs.empty:
+            if hubspot_configured():
+                n_verified = (
+                    int(le_hs.apply(lead_has_verified_contact, axis=1).sum())
+                    if not le_hs.empty
+                    else 0
+                )
+                st.caption(
+                    f"**Send to HubSpot** (below): upserts **{n_verified}** verified lead(s) with email "
+                    "for lists and campaigns. Rows without a verified Apollo-style contact are skipped."
+                )
+            else:
+                st.caption(
+                    "Add **HUBSPOT_ACCESS_TOKEN** to enable **Send to HubSpot** here right after enrichment."
+                )
     st.markdown("</div>", unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
-        if st.session_state.leads_enriched is not None and st.button(
-            "Push to CRM (queued) + Outreach →", type="primary", width="stretch"
+        le_btn = st.session_state.leads_enriched
+        hs_ok = (
+            hubspot_configured()
+            and isinstance(le_btn, pd.DataFrame)
+            and not le_btn.empty
+        )
+        if st.button(
+            "Send to HubSpot",
+            width="stretch",
+            disabled=not hs_ok,
+            help="Push verified enriched contacts (email + verified enrichment) to HubSpot without leaving this step.",
+            key="hq_hubspot_from_enrich",
         ):
-            le2 = st.session_state.leads_enriched
             assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
-            seeded = seed_crm_from_enriched(le2, assigned, st.session_state.blacklist)
+            summary = push_enriched_dataframe_to_hubspot(
+                hubspot_access_token(),
+                le_btn,
+                assigned,
+                st.session_state.blacklist,
+            )
+            for err in (summary.get("errors") or [])[:20]:
+                st.warning(str(err))
+            safe_toast(
+                f"HubSpot: {summary.get('ok', 0)} synced · skipped (no email in batch): "
+                f"{summary.get('skipped', 0)} · skipped (unverified / blacklist / dup): "
+                f"{summary.get('skipped_no_qualifying', 0)}",
+                icon="✅",
+            )
+            try:
+                append_event(
+                    "hubspot_push",
+                    {
+                        "source": "enrichment",
+                        "ok": summary.get("ok"),
+                        "skipped": summary.get("skipped"),
+                        "skipped_no_qualifying": summary.get("skipped_no_qualifying"),
+                        "errors_n": len(summary.get("errors") or []),
+                    },
+                )
+            except NocoDBError:
+                pass
+            st.rerun()
+    with c3:
+        le_push = st.session_state.leads_enriched
+        can_push_crm = isinstance(le_push, pd.DataFrame) and not le_push.empty
+        if st.button(
+            "Push to CRM (queued) + Outreach →",
+            type="primary",
+            width="stretch",
+            disabled=not can_push_crm,
+        ):
+            assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
+            seeded = seed_crm_from_enriched(le_push, assigned, st.session_state.blacklist)
             st.session_state.crm_records = merge_seed_with_existing(st.session_state.crm_records, seeded)
             try:
                 append_event("crm_queued", {"records": len(st.session_state.crm_records)})
