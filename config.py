@@ -226,6 +226,15 @@ def get_nocodb_settings() -> NocoDBSettings:
     )
 
 
+def hubspot_access_token() -> str:
+    """Private app access token for HubSpot CRM API (optional)."""
+    return (_lookup_str("HUBSPOT_ACCESS_TOKEN") or _lookup_str("HUBSPOT_PRIVATE_APP_TOKEN") or "").strip()
+
+
+def hubspot_configured() -> bool:
+    return bool(hubspot_access_token())
+
+
 def apollo_api_key() -> str:
     """Master API key for Apollo people search + match (optional)."""
     return (_lookup_str("APOLLO_API_KEY", "") or "").strip()

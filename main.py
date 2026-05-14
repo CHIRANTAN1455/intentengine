@@ -23,6 +23,7 @@ from config import (
     CORPUS_US_JOB_SHARE,
     HIGH_INTENT_MAX_AGE_DAYS,
     LEAD_STATUS_AWAITING_VERIFIED_CONTACT,
+    LEAD_STATUS_DNC,
     MEDIUM_INTENT_MAX_AGE_DAYS,
     MAX_EMAILS_PER_INBOX_PER_DAY,
     MAX_JOB_POSTING_AGE_DAYS,
@@ -31,6 +32,8 @@ from config import (
     REPLY_UNSUBSCRIBE,
     auto_save_pipeline_to_nocodb,
     enrichment_max_companies_per_run,
+    hubspot_access_token,
+    hubspot_configured,
 )
 from crm import (
     apply_blacklist_to_records,
@@ -69,6 +72,20 @@ from ui_theme import (
     section_header,
 )
 from walego import handoff_to_walego
+
+from hubspot_sync import push_crm_batch
+
+
+def _email_to_enriched_lead(le: pd.DataFrame | None) -> dict[str, dict[str, Any]]:
+    """Map lowercase email → enriched lead row dict (first match) for HubSpot job context."""
+    out: dict[str, dict[str, Any]] = {}
+    if le is None or le.empty or "Email" not in le.columns:
+        return out
+    for _, row in le.iterrows():
+        em = str(row.get("Email", "") or "").strip().lower()
+        if em and em not in out:
+            out[em] = row.to_dict()
+    return out
 
 
 def _build_ready_for_enrich(
@@ -1335,9 +1352,11 @@ elif st.session_state.step == 4:
 elif st.session_state.step == 5:
     st.markdown(
         section_header(
-            "CRM (in-house)",
+            "CRM (in-house + HubSpot)",
             "Leads enter after enrich as queued for outreach with an active outreach lock. "
-            "SDRs see assignment and state, but the system coordinates touches until release rules apply.",
+            "SDRs see assignment and state, but the system coordinates touches until release rules apply. "
+            "Use **Send to HubSpot** to create or update HubSpot contacts (by email) and attach a timeline note "
+            "with job links, intent score, and posting context.",
         ),
         unsafe_allow_html=True,
     )
@@ -1354,10 +1373,57 @@ elif st.session_state.step == 5:
         except NocoDBError as exc:
             st.warning(f"Could not log CRM batch to NocoDB events table: {exc}")
     st.dataframe(to_crm_dataframe(recs), width="stretch", hide_index=True)
-    c1, c2 = st.columns(2)
+    if hubspot_configured():
+        st.caption(
+            "HubSpot: token is set. Sync upserts by **email** (existing contacts get an updated profile "
+            "where fields are present and a **new note** on the record). "
+            "Sequences and one-to-one email from HubSpot use your connected inbox in HubSpot settings."
+        )
+    else:
+        st.caption(
+            "HubSpot: add **HUBSPOT_ACCESS_TOKEN** (private app token with `crm.objects.contacts` read/write "
+            "and `crm.objects.notes` write) to `.env` or Streamlit secrets to enable **Send to HubSpot**."
+        )
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
+        hs_token = hubspot_access_token()
+        hs_disabled = not hs_token or not recs
+        if st.button(
+            "Send to HubSpot",
+            width="stretch",
+            disabled=hs_disabled,
+            help="Creates or updates HubSpot contacts from visible CRM rows (skips rows with no email and DNC).",
+        ):
+            email_to_lead = _email_to_enriched_lead(le)
+            to_push = [
+                r
+                for r in recs
+                if isinstance(r, dict)
+                and str(r.get("lead_status") or "") != LEAD_STATUS_DNC
+                and str(r.get("email") or "").strip()
+            ]
+            summary = push_crm_batch(hs_token, to_push, email_to_lead)
+            for err in (summary.get("errors") or [])[:20]:
+                st.warning(str(err))
+            safe_toast(
+                f"HubSpot: {summary.get('ok', 0)} synced · skipped (no email): {summary.get('skipped', 0)}",
+                icon="✅",
+            )
+            try:
+                append_event(
+                    "hubspot_push",
+                    {
+                        "ok": summary.get("ok"),
+                        "skipped": summary.get("skipped"),
+                        "errors_n": len(summary.get("errors") or []),
+                    },
+                )
+            except NocoDBError:
+                pass
+            st.rerun()
+    with c3:
         if st.button("View dashboard →", type="primary", width="stretch"):
             st.session_state.step = 6
             st.rerun()
