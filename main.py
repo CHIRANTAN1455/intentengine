@@ -73,7 +73,8 @@ from ui_theme import (
 )
 from walego import handoff_to_walego
 
-from hubspot_sync import push_crm_batch, push_enriched_dataframe_to_hubspot
+from enrichment_hubspot import push_enriched_dataframe_to_hubspot
+from hubspot_sync import push_crm_batch
 
 
 def _email_to_enriched_lead(le: pd.DataFrame | None) -> dict[str, dict[str, Any]]:

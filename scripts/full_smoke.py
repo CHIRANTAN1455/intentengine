@@ -61,7 +61,8 @@ def step_imports() -> bool:
         "config", "llm_client", "enrichment", "apollo_enrichment", "email_engine", "crm",
         "internal_intent", "pipeline", "scoring", "intent_engine",
         "reply_classification", "role_suggestions", "outreach", "walego",
-        "dashboard_metrics", "nocodb_client", "social_intent", "user_geo", "hubspot_sync",
+        "dashboard_metrics", "nocodb_client", "social_intent", "user_geo",
+        "hubspot_sync", "enrichment_hubspot",
     ]
     try:
         for m in mods:
