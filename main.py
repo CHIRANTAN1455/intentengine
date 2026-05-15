@@ -55,7 +55,7 @@ from enrichment import (
     sanitize_enriched_dataframe,
     waterfall_enrichment,
 )
-from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache
+from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache, jobspy_runtime_status
 from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_rest import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
 from outreach import dispatch_email_internal
@@ -72,6 +72,12 @@ from ui_theme import (
     section_header,
 )
 from walego import handoff_to_walego
+from auth_gate import (
+    HQ_NEEDS_LIVE_INTENT_KEY,
+    ensure_auth_session_keys,
+    is_authenticated,
+    render_login_gate,
+)
 
 from enrichment_hubspot import push_enriched_dataframe_to_hubspot
 from hubspot_sync import push_crm_batch
@@ -209,6 +215,8 @@ if "client_landing_dismissed" not in st.session_state:
 if st.session_state.get("_skip_welcome_forever"):
     st.session_state.client_landing_dismissed = True
 
+ensure_auth_session_keys()
+
 
 def prev_step():
     cur = int(st.session_state.step)
@@ -315,6 +323,25 @@ def _payload_for_save() -> dict:
     }
 
 
+def _apply_post_login_live_intent_policy() -> None:
+    """After login: never show a stale NocoDB/cached snapshot — pull live boards next."""
+    if not st.session_state.pop(HQ_NEEDS_LIVE_INTENT_KEY, False):
+        return
+    invalidate_intent_corpus_cache()
+    st.session_state.company_jobs = None
+    st.session_state.company_scored = None
+    st.session_state.pop("_intent_max_age_applied", None)
+    st.session_state.pop("_intent_geo_key_applied", None)
+    st.session_state.pop("_social_intent_snapshot", None)
+    st.session_state._intent_prefetch_submitted = False
+    st.session_state.pop("_intent_prefetch_future", None)
+    st.session_state.pop("_intent_prefetch_ready", None)
+    st.session_state.pop("_prefetch_ready_toast_shown", None)
+    st.session_state.pop("_intent_prefetch_error", None)
+    st.session_state._force_live_intent_fetch = True
+    st.session_state._skip_intent_snapshot_hydrate = True
+
+
 def _hydrate_from_payload(payload: dict) -> None:
     def _df(key: str) -> pd.DataFrame | None:
         raw = payload.get(key)
@@ -322,8 +349,10 @@ def _hydrate_from_payload(payload: dict) -> None:
             return None
         return pd.DataFrame(raw)
 
-    st.session_state.company_jobs = _df("company_jobs")
-    st.session_state.company_scored = _df("company_scored")
+    skip_intent_snap = bool(st.session_state.get("_skip_intent_snapshot_hydrate"))
+    if not skip_intent_snap:
+        st.session_state.company_jobs = _df("company_jobs")
+        st.session_state.company_scored = _df("company_scored")
     st.session_state.leads_enriched = sanitize_enriched_dataframe(_df("leads_enriched"))
     st.session_state.emails_sent_count = int(payload.get("emails_sent_count") or 0)
     st.session_state.walego_actions = int(payload.get("walego_actions") or 0)
@@ -344,19 +373,19 @@ def _hydrate_from_payload(payload: dict) -> None:
             st.session_state.max_job_age_days = max(1, min(int(ma), MAX_JOB_POSTING_AGE_DAYS))
         except (TypeError, ValueError):
             pass
-    if isinstance(st.session_state.company_scored, pd.DataFrame):
+    if not skip_intent_snap and isinstance(st.session_state.company_scored, pd.DataFrame):
         st.session_state._intent_max_age_applied = int(
             st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS)
         )
     vgk = payload.get("viewer_geo_key")
-    if vgk is not None:
+    if vgk is not None and not skip_intent_snap:
         st.session_state._intent_geo_key_applied = str(vgk)
     vg = payload.get("viewer_geo")
     if isinstance(vg, dict) and vg:
         st.session_state._viewer_geo = vg
         st.session_state._viewer_geo_ttl = time.time() + 3600.0
     si = payload.get("social_intent")
-    if si is not None:
+    if si is not None and not skip_intent_snap:
         st.session_state._social_intent_snapshot = pd.DataFrame(si) if si else pd.DataFrame()
     ot = payload.get("outreach_tiers")
     if isinstance(ot, list) and ot:
@@ -378,6 +407,7 @@ def _viewer_geo_maybe_refresh() -> None:
 
 def _prefetch_intent_worker(max_age: int, geo_hint: dict[str, Any] | None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Runs off the main Streamlit thread — must not call any ``st.*`` APIs."""
+    invalidate_intent_corpus_cache()
     return run_intent_stage(max_job_age_days=max_age, geo_hint=geo_hint, on_jobs_stream=None)
 
 
@@ -420,6 +450,8 @@ def _try_merge_prefetch_future() -> bool:
     st.session_state._intent_geo_key_applied = corpus_geo_cache_key(st.session_state.get("_viewer_geo"))
     st.session_state._intent_prefetch_ready = True
     st.session_state.pop("_intent_prefetch_error", None)
+    st.session_state.pop("_force_live_intent_fetch", None)
+    st.session_state.pop("_skip_intent_snapshot_hydrate", None)
     return True
 
 
@@ -446,6 +478,8 @@ def _drain_prefetch_future_blocking() -> None:
     st.session_state._intent_geo_key_applied = corpus_geo_cache_key(st.session_state.get("_viewer_geo"))
     st.session_state._intent_prefetch_ready = True
     st.session_state.pop("_intent_prefetch_error", None)
+    st.session_state.pop("_force_live_intent_fetch", None)
+    st.session_state.pop("_skip_intent_snapshot_hydrate", None)
 
 
 @st.fragment(run_every=timedelta(seconds=1.0))
@@ -462,16 +496,16 @@ def _client_welcome_background_fragment() -> None:
         return
     merged = _try_merge_prefetch_future()
     if merged and not st.session_state.get("_prefetch_ready_toast_shown"):
-        safe_toast("Intent snapshot is ready — enter the command center when you like.", icon="✨")
+        safe_toast("Live listings are ready — enter the command center.", icon="✨")
         st.session_state._prefetch_ready_toast_shown = True
     prog_slot = st.empty()
     fut = st.session_state.get("_intent_prefetch_future")
     if st.session_state.get("_intent_prefetch_ready"):
-        prog_slot.progress(1.0, text="Intent snapshot ready")
+        prog_slot.progress(1.0, text="Live intent board ready")
         return
     if fut is not None and not fut.done():
         pulse = 0.18 + 0.72 * (0.5 + 0.5 * math.sin(time.monotonic() * 2.05))
-        prog_slot.progress(min(0.94, pulse), text="Fetching listings & scores in the background…")
+        prog_slot.progress(min(0.94, pulse), text="Live fetch: Indeed / LinkedIn listings & scores…")
     elif st.session_state.get("_intent_prefetch_error"):
         prog_slot.warning("Background fetch reported an issue — we will retry after you enter.")
     elif st.session_state.get("_intent_prefetch_submitted"):
@@ -570,6 +604,12 @@ def _hydrate_from_nocodb() -> None:
 
 def _ensure_intent():
     _drain_prefetch_future_blocking()
+    if st.session_state.pop("_force_live_intent_fetch", False):
+        invalidate_intent_corpus_cache()
+        st.session_state.company_jobs = None
+        st.session_state.company_scored = None
+        st.session_state.pop("_intent_max_age_applied", None)
+        st.session_state.pop("_intent_geo_key_applied", None)
     max_age = int(st.session_state.get("max_job_age_days", MAX_JOB_POSTING_AGE_DAYS))
     max_age = max(1, min(max_age, MAX_JOB_POSTING_AGE_DAYS))
     cached = st.session_state.get("_intent_max_age_applied")
@@ -637,6 +677,7 @@ def _ensure_intent():
                 pipe.update(state="complete")
                 safe_toast(f"Intent ready — {nj} job postings, {nc} companies scored.", icon="✅")
                 intent_refreshed = True
+                st.session_state.pop("_skip_intent_snapshot_hydrate", None)
                 try:
                     st.session_state._social_intent_snapshot = fetch_social_intent(geo_hint=geo_hint)
                 except Exception:
@@ -674,6 +715,12 @@ def _ensure_intent():
 
 
 st.markdown(get_global_css(), unsafe_allow_html=True)
+
+if not is_authenticated():
+    render_login_gate()
+    st.stop()
+
+_apply_post_login_live_intent_policy()
 
 # Native Streamlit boot: first paint only (avoids flashing on every rerun).
 # Use a spinner only — collapsed st.status + state="complete" can render overlapping labels
@@ -860,8 +907,8 @@ if not st.session_state.get("client_landing_dismissed"):
     st.markdown(render_client_welcome(BRAND), unsafe_allow_html=True)
     st.markdown(
         "<p style='text-align:center;color:#a1a1aa;font-size:0.95rem;margin:-0.5rem 0 1.25rem;max-width:520px;margin-left:auto;margin-right:auto;'>"
-        "Live listings and scores load in the background while you read — by the time you enter, "
-        "the first batch is often already on the board.</p>",
+        "Pulling <strong>live</strong> listings from Indeed / LinkedIn now — scores update as rows arrive. "
+        "Enter when the bar completes for the freshest board.</p>",
         unsafe_allow_html=True,
     )
     # Buttons rendered FIRST and unconditionally so they never get hidden by the
@@ -916,12 +963,20 @@ if st.session_state.step == 0:
             f"Jobs fetched this run: {len(jobs) if isinstance(jobs, pd.DataFrame) else 0}"
         )
         if isinstance(jobs, pd.DataFrame) and jobs.empty:
-            st.info(
-                "No rows yet — common causes: **(1)** Wrong dependency: the PyPI package `jobspy` is not the board "
-                "scraper; this app needs **`python-jobspy`** (Python **3.10+**). Reinstall from `requirements.txt`. "
-                "**(2)** Live boards rate-limited / unavailable — try again in a few minutes. "
-                "**(3)** Click **Refresh intent (live job boards)** to retry."
-            )
+            js = jobspy_runtime_status()
+            if not js.get("jobspy_ok"):
+                st.error(
+                    f"**Live job boards unavailable** — running Python **{js.get('python')}**. "
+                    f"`python-jobspy` needs **Python 3.10+** (package on PyPI: `python-jobspy`, not `jobspy`). "
+                    f"{js.get('hint') or ''}"
+                )
+                if js.get("error"):
+                    st.caption(f"Import error: `{js['error']}`")
+            else:
+                st.info(
+                    "No rows from Indeed/LinkedIn this run — boards may be rate-limiting. "
+                    "Wait a minute and click **Refresh intent (live job boards)**."
+                )
     with d2:
         st.markdown(
             glass_card_start("Company intelligence")

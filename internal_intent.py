@@ -51,6 +51,42 @@ def invalidate_intent_corpus_cache() -> None:
     _CORPUS_CACHE.clear()
 
 
+def jobspy_runtime_status() -> dict[str, Any]:
+    """Whether this Python can import python-jobspy (needs 3.10+, package name python-jobspy)."""
+    import sys
+
+    py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py_ok = sys.version_info >= (3, 10)
+    try:
+        from jobspy import scrape_jobs  # noqa: F401
+
+        return {
+            "python": py,
+            "python_ok": py_ok,
+            "jobspy_ok": True,
+            "error": None,
+            "hint": None,
+        }
+    except Exception as exc:
+        hint = (
+            "Install with Python 3.10+: `python3.13 -m venv .venv && "
+            ".venv/bin/pip install -r requirements.txt` then "
+            "`.venv/bin/python -m streamlit run main.py`"
+        )
+        if not py_ok:
+            hint = (
+                f"Current interpreter is Python {py} (3.10+ required). "
+                "Do not use macOS `/usr/bin/python3` (often 3.9). " + hint
+            )
+        return {
+            "python": py,
+            "python_ok": py_ok,
+            "jobspy_ok": False,
+            "error": str(exc),
+            "hint": hint,
+        }
+
+
 def _corpus_cache_key(geo_hint: dict[str, Any] | None) -> str:
     if not geo_hint:
         return "default"

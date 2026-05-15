@@ -1,6 +1,7 @@
 """Premium visual system for hirequity (Streamlit-injected CSS)."""
 from __future__ import annotations
 
+import math
 from html import escape
 
 BRAND = "hirequity"
@@ -461,6 +462,297 @@ def get_global_css() -> str:
   .hq-pixel-line strong { color: #f5f3ff !important; font-weight: 600; }
 </style>
 """
+
+
+def _build_connect_dots_svg() -> str:
+    """Connect-the-dots mesh scaled to fill the left panel (square viewBox, no stretch)."""
+    w = h = 500
+    pad_x, pad_y = 36, 40
+    inner_w = w - pad_x * 2
+    inner_h = h - pad_y * 2
+    rows = 8
+    nodes: list[tuple[float, float]] = []
+    grid: list[list[int]] = []
+    idx = 0
+
+    for ri in range(rows):
+        t_row = ri / max(rows - 1, 1)
+        # Wider at vertical center, taper toward top/bottom — fills the panel evenly
+        band = math.sin(t_row * math.pi) ** 0.75
+        n_cols = max(5, int(5 + band * 6))
+        row_ids: list[int] = []
+        for ci in range(n_cols):
+            t_col = ci / max(n_cols - 1, 1)
+            # Fan uses ~88% of inner width; spine continues to the right edge
+            x = pad_x + t_col * inner_w * (0.52 + 0.36 * band)
+            y = pad_y + t_row * inner_h + math.sin(t_col * math.pi * 1.05) * 10 * band
+            nodes.append((x, y))
+            row_ids.append(idx)
+            idx += 1
+        grid.append(row_ids)
+
+    hub = (w - pad_x * 0.55, h * 0.5)
+    spine_start = len(nodes)
+    spine_x0 = pad_x + inner_w * 0.58
+    for i in range(12):
+        t = i / 11
+        nodes.append(
+            (
+                spine_x0 + t * (hub[0] - spine_x0),
+                h * 0.5 + math.sin(t * math.pi) * 10 * (1 - t * 0.5),
+            )
+        )
+
+    edges: list[tuple[int, int]] = []
+    for ri, row in enumerate(grid):
+        for ci, nid in enumerate(row):
+            for dr, dc in ((0, 1), (1, 0)):
+                r2, c2 = ri + dr, ci + dc
+                if r2 >= len(grid) or c2 >= len(grid[r2]):
+                    continue
+                j = grid[r2][c2]
+                if j > nid:
+                    edges.append((nid, j))
+    for k in range(spine_start, len(nodes) - 1):
+        edges.append((k, k + 1))
+
+    lines: list[str] = []
+    for i, j in edges:
+        x1, y1 = nodes[i]
+        x2, y2 = nodes[j]
+        d = math.hypot(x2 - x1, y2 - y1)
+        op = 0.2 + 0.5 * (1 - min(d / 62, 1))
+        lines.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="#7dd3fc" stroke-opacity="{op:.2f}" stroke-width="1.2"/>'
+        )
+
+    dots: list[str] = []
+    for i, (x, y) in enumerate(nodes):
+        r = 3.4 if i >= spine_start else 2.0 + (x / w) * 1.4
+        fill = "#f0f9ff" if i >= len(nodes) - 1 else "#bae6fd"
+        dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{fill}"/>')
+
+    hx, hy = hub
+    mid_y = h * 0.5
+    return f"""<svg class="hq-login-mesh-svg" viewBox="0 0 {w} {h}" preserveAspectRatio="xMidYMid meet"
+  xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Connecting signals network">
+  <defs>
+    <radialGradient id="hqGlow" cx="35%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="{w}" height="{h}" fill="transparent"/>
+  <ellipse cx="{w*0.32:.0f}" cy="{mid_y:.0f}" rx="{w*0.42:.0f}" ry="{h*0.4:.0f}" fill="url(#hqGlow)"/>
+  <g stroke-linecap="round">{"".join(lines)}</g>
+  <path d="M {pad_x} {mid_y:.0f} Q {w*0.28:.0f} {mid_y-40:.0f} {hx-36:.0f} {hy:.0f} T {hx:.0f} {hy:.0f}"
+        fill="none" stroke="#a5f3fc" stroke-width="2.4" stroke-opacity="0.65"/>
+  <g>{"".join(dots)}</g>
+  <circle cx="{hx:.0f}" cy="{hy:.0f}" r="9" fill="#e0f2fe" opacity="0.4"/>
+  <circle cx="{hx:.0f}" cy="{hy:.0f}" r="5" fill="#ffffff"/>
+</svg>"""
+
+
+_LOGIN_MESH_SVG = _build_connect_dots_svg()
+
+
+def get_login_css() -> str:
+    return """
+<style>
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) [data-testid="stSidebar"] {
+    display: none !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .block-container {
+    max-width: 100% !important;
+    padding: 0.75rem 1.25rem 1.5rem !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker)::before {
+    background: radial-gradient(ellipse 70% 55% at 12% 40%, rgba(125, 211, 252, 0.14), transparent 55%),
+      linear-gradient(165deg, #050814 0%, #0a1020 48%, #07070a 100%) !important;
+  }
+  .hq-login-card-wrap { display: none !important; }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .hq-login-card-wrap + div {
+    width: 100% !important;
+    max-width: none !important;
+    min-height: min(88vh, 860px);
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    align-items: stretch !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .hq-login-card-wrap + div [data-testid="column"]:first-child {
+    border-right: 1px solid rgba(255, 255, 255, 0.07);
+    background: radial-gradient(ellipse 95% 80% at 20% 50%, rgba(56, 189, 248, 0.12), transparent 62%),
+      linear-gradient(165deg, rgba(10, 16, 32, 0.98) 0%, rgba(6, 8, 16, 0.99) 100%);
+    padding: 0.5rem 0.25rem 0.5rem 0.5rem !important;
+    min-height: min(88vh, 860px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .hq-login-card-wrap + div [data-testid="column"]:last-child {
+    padding: clamp(1.5rem, 4vw, 3rem) clamp(1.25rem, 3vw, 2.5rem) !important;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: min(88vh, 860px);
+  }
+  .hq-login-mesh-panel {
+    width: 100%;
+    height: 100%;
+    min-height: min(82vh, 780px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem 1rem 1.25rem;
+    box-sizing: border-box;
+  }
+  .hq-login-mesh-panel .hq-login-mesh-frame {
+    width: 100%;
+    max-width: 100%;
+    aspect-ratio: 1 / 1;
+    max-height: min(72vh, calc(50vw - 2rem));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .hq-login-mesh-panel svg.hq-login-mesh-svg {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    display: block !important;
+    filter: drop-shadow(0 12px 40px rgba(56, 189, 248, 0.14));
+  }
+  .hq-login-mesh-tag {
+    font-family: 'DM Mono', ui-monospace, monospace !important;
+    font-size: clamp(0.65rem, 1vw, 0.8rem);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #67e8f9 !important;
+    margin: 1.25rem 0 0;
+    opacity: 0.92;
+    align-self: flex-start;
+    padding-left: 0.5rem;
+  }
+  .hq-login-kicker {
+    font-size: 0.72rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #94a3b8 !important;
+    margin: 0 0 0.85rem;
+  }
+  .hq-login-title {
+    font-size: clamp(2rem, 4.2vw, 3.15rem);
+    font-weight: 700;
+    line-height: 1.08;
+    margin: 0 0 0.35rem;
+    color: #9bdcfb !important;
+    letter-spacing: -0.03em;
+  }
+  .hq-login-title em {
+    font-style: normal;
+    color: #e0f2fe !important;
+  }
+  .hq-login-byline {
+    font-size: 0.95rem;
+    color: #cbd5e1 !important;
+    margin: 0 0 1.5rem;
+  }
+  .hq-login-byline strong {
+    color: #f8fafc !important;
+    font-weight: 600;
+  }
+  .hq-login-field-label {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #94a3b8 !important;
+    margin: 0.35rem 0 0.35rem;
+  }
+  .hq-login-foot,
+  .hq-login-status {
+    font-family: 'DM Mono', ui-monospace, monospace !important;
+    font-size: 0.78rem;
+    line-height: 1.65;
+    color: #e2e8f0 !important;
+    margin: 1.1rem 0 0;
+  }
+  .hq-login-status--err { color: #fda4af !important; }
+
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput > div > div {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(148, 163, 184, 0.35) !important;
+    border-radius: 12px !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput input {
+    color: #f8fafc !important;
+    font-family: 'DM Mono', ui-monospace, monospace !important;
+    font-size: 0.88rem !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput input::placeholder {
+    color: #64748b !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button,
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) [data-testid="baseButton-primary"] {
+    background: #f8fafc !important;
+    color: #0f172a !important;
+    -webkit-text-fill-color: #0f172a !important;
+    border: none !important;
+    box-shadow: 0 8px 28px rgba(248, 250, 252, 0.12) !important;
+    font-weight: 700 !important;
+    border-radius: 999px !important;
+    padding: 0.62rem 1.25rem !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button:hover,
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) [data-testid="baseButton-primary"]:hover {
+    background: #ffffff !important;
+    color: #020617 !important;
+    -webkit-text-fill-color: #020617 !important;
+    box-shadow: 0 10px 32px rgba(248, 250, 252, 0.2) !important;
+  }
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button *,
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) [data-testid="baseButton-primary"] *,
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button p,
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button span,
+  [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button div {
+    color: #0f172a !important;
+    -webkit-text-fill-color: #0f172a !important;
+    fill: #0f172a !important;
+  }
+  @media (max-width: 900px) {
+    [data-testid="stAppViewContainer"]:has(.hq-login-marker) .hq-login-card-wrap + div [data-testid="column"]:first-child {
+      border-right: none !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+  }
+</style>
+"""
+
+
+def render_login_mesh_component() -> None:
+    """Render connect-the-dots mesh (inline SVG — preserves aspect ratio)."""
+    import streamlit as st
+
+    st.markdown(
+        f'<div class="hq-login-mesh-panel">'
+        f'<div class="hq-login-mesh-frame">{_LOGIN_MESH_SVG}</div>'
+        '<p class="hq-login-mesh-tag">Signals connect · intent surfaces</p></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_login_headline() -> str:
+    return """
+    <p class="hq-login-kicker">Secure access</p>
+    <h1 class="hq-login-title">Welcome to <em>hirequity</em></h1>
+    <p class="hq-login-byline">by <strong>Sledopyt AI</strong></p>
+    """
 
 
 def render_client_welcome(brand: str) -> str:
