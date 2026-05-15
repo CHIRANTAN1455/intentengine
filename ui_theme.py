@@ -560,6 +560,8 @@ _LOGIN_MESH_SVG = _build_connect_dots_svg()
 def get_login_css() -> str:
     return """
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600&display=swap');
+
   [data-testid="stAppViewContainer"]:has(.hq-login-marker) [data-testid="stSidebar"] {
     display: none !important;
   }
@@ -660,13 +662,38 @@ def get_login_css() -> str:
     color: #e0f2fe !important;
   }
   .hq-login-byline {
-    font-size: 0.95rem;
-    color: #cbd5e1 !important;
-    margin: 0 0 1.5rem;
+    font-size: 0.88rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #94a3b8 !important;
+    margin: 0 0 0.65rem;
+    line-height: 1.5;
   }
   .hq-login-byline strong {
-    color: #f8fafc !important;
+    color: #e0f2fe !important;
     font-weight: 600;
+    letter-spacing: 0.08em;
+  }
+  .hq-login-byline-ar {
+    font-family: 'Noto Naskh Arabic', 'Traditional Arabic', serif !important;
+    font-size: 1.12rem;
+    font-weight: 500;
+    color: #cbd5e1 !important;
+    margin: 0 0 1.5rem;
+    line-height: 1.65;
+    direction: rtl;
+    text-align: right;
+    unicode-bidi: plaintext;
+  }
+  .hq-login-byline-ar strong {
+    color: #f0f9ff !important;
+    font-weight: 600;
+    font-size: 1.18rem;
+  }
+  .hq-login-byline-ar .hq-ar-dim {
+    color: #67e8f9 !important;
+    font-size: 0.95rem;
+    opacity: 0.92;
   }
   .hq-login-field-label {
     font-size: 0.72rem;
@@ -749,9 +776,12 @@ def render_login_mesh_component() -> None:
 
 def render_login_headline() -> str:
     return """
-    <p class="hq-login-kicker">Secure access</p>
+    <p class="hq-login-kicker">Exclusive access</p>
     <h1 class="hq-login-title">Welcome to <em>hirequity</em></h1>
-    <p class="hq-login-byline">by <strong>Sledopyt AI</strong></p>
+    <p class="hq-login-byline">Powered by <strong>ELV8 AI</strong></p>
+    <p class="hq-login-byline-ar" lang="ar" dir="rtl">
+      <span class="hq-ar-dim">محركات من</span> <strong>سلودوبيت AI</strong>
+    </p>
     """
 
 
