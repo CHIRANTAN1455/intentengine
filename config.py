@@ -7,25 +7,10 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from app_secrets import lookup_str as _lookup_str
+from app_secrets import truthy as _truthy
+
 load_dotenv()
-
-
-def _lookup_str(name: str, default: str | None = None) -> str | None:
-    """Resolve a setting from process env, then Streamlit Cloud secrets (not in os.environ)."""
-    raw = os.getenv(name)
-    if raw is not None and str(raw).strip() != "":
-        return str(raw).strip()
-    try:
-        import streamlit as st
-
-        sec = getattr(st, "secrets", None)
-        if sec is not None and name in sec:
-            val = sec[name]
-            if val is not None and str(val).strip() != "":
-                return str(val).strip()
-    except Exception:
-        pass
-    return default
 
 
 BRAND = "hirequity"
@@ -38,10 +23,6 @@ PRODUCT = "Intent Outbound Engine"
 # fabricate contact rows are removed. The flag is here for documentation +
 # anyone who imports it can read the current stance from one place.
 CONTACT_FABRICATION_DISABLED = True
-
-
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def allow_synthetic_intent_corpus() -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import time
@@ -12,13 +13,16 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from config import BRAND
+
+st.set_page_config(page_title=f"{BRAND} – Command Center", page_icon="✦", layout="wide")
+
 from apollo_enrichment import (
     apollo_contact_enrichment_available,
     apollo_last_error,
     apollo_quick_probe,
 )
 from config import (
-    BRAND,
     CORPUS_CA_JOB_SHARE,
     CORPUS_US_JOB_SHARE,
     HIGH_INTENT_MAX_AGE_DAYS,
@@ -45,7 +49,7 @@ from crm import (
 )
 from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
-from email_engine import build_email_sequence
+build_email_sequence = importlib.import_module("email_engine").build_email_sequence
 from role_suggestions import role_based_suggestions
 from enrichment import (
     CONTACT_PENDING_STATUS,
@@ -121,10 +125,6 @@ def _enrichment_queue_df() -> pd.DataFrame:
     if not isinstance(mt, list):
         mt = ["High", "Medium"]
     return _build_ready_for_enrich(st.session_state.get("company_scored"), mt)
-
-
-# --- PAGE CONFIG ---
-st.set_page_config(page_title=f"{BRAND} – Command Center", page_icon="✦", layout="wide")
 
 
 def safe_toast(message: str, *, icon: str | None = None) -> None:

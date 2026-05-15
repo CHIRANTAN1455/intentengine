@@ -23,13 +23,13 @@ from typing import Any
 
 import requests
 
+from app_secrets import lookup_str as _lookup_str
 from config import (
     CORPUS_CA_JOB_SHARE,
     CORPUS_US_JOB_SHARE,
     INTENT_CORPUS_MAX_JOBS,
     INTENT_CORPUS_MIN_JOBS,
     MAX_JOB_POSTING_AGE_DAYS,
-    _lookup_str,
     _read_optional_env,
 )
 
