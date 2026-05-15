@@ -1,4 +1,9 @@
-"""NocoDB REST client for pipeline persistence."""
+"""NocoDB REST client for pipeline persistence.
+
+Named ``nocodb_rest`` (not ``nocodb_client``) so installs of the unrelated PyPI
+package ``nocodb-client`` — which registers the top-level module
+``nocodb_client`` — cannot shadow this app on Streamlit Cloud / uv.
+"""
 
 from __future__ import annotations
 

@@ -54,7 +54,7 @@ def step_imports() -> bool:
         import config  # noqa: F401
 
         for name in (
-            "nocodb_client",
+            "nocodb_rest",
             "llm_client",
             "user_geo",
             "pipeline",
@@ -65,7 +65,7 @@ def step_imports() -> bool:
         log("Imports", "FAIL", f"{exc!r}")
         traceback.print_exc()
         return False
-    log("Imports", "PASS", "config, nocodb_client, llm_client, user_geo, pipeline, enrichment")
+    log("Imports", "PASS", "config, nocodb_rest, llm_client, user_geo, pipeline, enrichment")
     return True
 
 
@@ -116,7 +116,7 @@ def _nocodb_table_id_placeholder(table_id: str) -> bool:
 def step_nocodb() -> bool:
     try:
         from config import get_nocodb_settings
-        from nocodb_client import NocoDBError, list_records
+        from nocodb_rest import NocoDBError, list_records
 
         s = get_nocodb_settings()
     except RuntimeError as exc:

@@ -57,7 +57,7 @@ from enrichment import (
 )
 from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache
 from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
-from nocodb_client import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
+from nocodb_rest import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
 from outreach import dispatch_email_internal
 from pipeline import filter_outreach_ready, run_intent_stage
 from reply_classification import classify_reply_text, crm_eligible

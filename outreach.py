@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nocodb_client import append_event, NocoDBError
+from nocodb_rest import append_event, NocoDBError
 
 
 def personalize_template(template: str, lead: dict) -> str:
