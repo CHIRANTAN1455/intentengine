@@ -63,8 +63,14 @@ def push_enriched_dataframe_to_hubspot(
         records.append(seed_post_enrich_row(row, assigned_sdr=assigned_sdr))
 
     out["skipped_no_qualifying"] = skipped_qual
+    if not records:
+        return out
+
     batch = push_crm_batch(token, records, email_to_lead, delay_seconds=delay_seconds)
     out["ok"] = batch.get("ok", 0)
     out["skipped"] = batch.get("skipped", 0)
     out["errors"] = batch.get("errors") or errs
+    out["attempted"] = batch.get("attempted", 0)
+    out["success"] = bool(batch.get("success"))
+    out["http_status"] = batch.get("http_status")
     return out

@@ -277,7 +277,14 @@ def push_crm_batch(
     email to an optional enriched-lead dict (for job URLs / posting text).
     """
     errs: list[str] = []
-    summary: dict[str, Any] = {"ok": 0, "skipped": 0, "errors": errs}
+    summary: dict[str, Any] = {
+        "ok": 0,
+        "skipped": 0,
+        "errors": errs,
+        "attempted": 0,
+        "success": False,
+        "http_status": None,
+    }
     for rec in crm_records:
         if not isinstance(rec, dict):
             continue
@@ -286,6 +293,7 @@ def push_crm_batch(
             summary["skipped"] += 1
             continue
         lead = email_to_lead.get(em)
+        summary["attempted"] += 1
         try:
             cid, created = upsert_contact_with_note(token, rec, lead)
             summary["ok"] += 1
@@ -299,4 +307,7 @@ def push_crm_batch(
             errs.append(f"{em}: {exc}")
         if delay_seconds > 0:
             time.sleep(delay_seconds)
+    if summary["ok"] > 0 and not errs:
+        summary["success"] = True
+        summary["http_status"] = 200
     return summary

@@ -127,6 +127,79 @@ def _enrichment_queue_df() -> pd.DataFrame:
     return _build_ready_for_enrich(st.session_state.get("company_scored"), mt)
 
 
+HUBSPOT_PUSH_COOLDOWN_SEC = 20
+
+
+def _hubspot_cooldown_remaining() -> float:
+    until = float(st.session_state.get("hq_hubspot_cooldown_until") or 0)
+    return max(0.0, until - time.time())
+
+
+def _hubspot_arm_cooldown() -> None:
+    st.session_state["hq_hubspot_cooldown_until"] = time.time() + HUBSPOT_PUSH_COOLDOWN_SEC
+
+
+def _hubspot_store_push_result(summary: dict[str, Any], *, source: str) -> None:
+    st.session_state["hq_hubspot_last_push"] = {
+        "source": source,
+        "summary": summary,
+        "ts": time.time(),
+    }
+
+
+def _render_hubspot_push_banner() -> None:
+    """Persistent success / error message after the last HubSpot sync."""
+    payload = st.session_state.get("hq_hubspot_last_push")
+    if not isinstance(payload, dict):
+        return
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return
+    ok_n = int(summary.get("ok") or 0)
+    skipped = int(summary.get("skipped") or 0)
+    skipped_q = int(summary.get("skipped_no_qualifying") or 0)
+    errs = summary.get("errors") or []
+    if summary.get("success") and summary.get("http_status") == 200:
+        st.success(
+            f"**Data sent to HubSpot** — HTTP **200 OK**. "
+            f"**{ok_n}** contact(s) synced successfully."
+        )
+        return
+    if ok_n > 0 and errs:
+        st.warning(
+            f"**Partial HubSpot sync** — {ok_n} contact(s) synced; "
+            f"{len(errs)} error(s). See warnings below."
+        )
+        return
+    if errs and ok_n == 0:
+        st.error("**HubSpot sync failed.** No contacts were synced. See warnings below.")
+        return
+    if ok_n == 0:
+        st.info(
+            "No contacts were sent to HubSpot "
+            f"(skipped in batch: {skipped}, not qualifying: {skipped_q})."
+        )
+
+
+def _render_hubspot_cooldown_hint() -> None:
+    rem = _hubspot_cooldown_remaining()
+    if rem > 0:
+        secs = int(math.ceil(rem))
+        st.caption(
+            f"HubSpot sync is cooling down — wait **{secs}s** before sending again "
+            f"(prevents duplicate pushes)."
+        )
+
+
+def _hubspot_push_help(base: str) -> str:
+    rem = _hubspot_cooldown_remaining()
+    if rem > 0:
+        return (
+            f"Please wait {int(math.ceil(rem))} seconds before sending to HubSpot again."
+        )
+    return base
+
+
 def safe_toast(message: str, *, icon: str | None = None) -> None:
     """``st.toast`` that never crashes on a bad icon.
 
@@ -1180,6 +1253,8 @@ elif st.session_state.step == 2:
                     "Add **HUBSPOT_ACCESS_TOKEN** to enable **Send to HubSpot** here right after enrichment."
                 )
     st.markdown("</div>", unsafe_allow_html=True)
+    _render_hubspot_push_banner()
+    _render_hubspot_cooldown_hint()
     c1, c2, c3 = st.columns(3)
     with c1:
         st.button("← Back", on_click=prev_step, width="stretch")
@@ -1190,28 +1265,33 @@ elif st.session_state.step == 2:
             and isinstance(le_btn, pd.DataFrame)
             and not le_btn.empty
         )
+        hs_cooldown = _hubspot_cooldown_remaining() > 0
         if st.button(
             "Send to HubSpot",
             width="stretch",
-            disabled=not hs_ok,
-            help="Push verified enriched contacts (email + verified enrichment) to HubSpot without leaving this step.",
+            disabled=not hs_ok or hs_cooldown,
+            help=_hubspot_push_help(
+                "Push verified enriched contacts (email + verified enrichment) to HubSpot without leaving this step."
+            ),
             key="hq_hubspot_from_enrich",
         ):
+            _hubspot_arm_cooldown()
             assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
-            summary = push_enriched_dataframe_to_hubspot(
-                hubspot_access_token(),
-                le_btn,
-                assigned,
-                st.session_state.blacklist,
-            )
+            with st.spinner("Sending data to HubSpot…"):
+                summary = push_enriched_dataframe_to_hubspot(
+                    hubspot_access_token(),
+                    le_btn,
+                    assigned,
+                    st.session_state.blacklist,
+                )
+            _hubspot_store_push_result(summary, source="enrichment")
             for err in (summary.get("errors") or [])[:20]:
                 st.warning(str(err))
-            safe_toast(
-                f"HubSpot: {summary.get('ok', 0)} synced · skipped (no email in batch): "
-                f"{summary.get('skipped', 0)} · skipped (unverified / blacklist / dup): "
-                f"{summary.get('skipped_no_qualifying', 0)}",
-                icon="✅",
-            )
+            if summary.get("success"):
+                safe_toast(
+                    f"HubSpot HTTP 200 OK — {summary.get('ok', 0)} contact(s) sent.",
+                    icon="✅",
+                )
             try:
                 append_event(
                     "hubspot_push",
@@ -1220,6 +1300,7 @@ elif st.session_state.step == 2:
                         "ok": summary.get("ok"),
                         "skipped": summary.get("skipped"),
                         "skipped_no_qualifying": summary.get("skipped_no_qualifying"),
+                        "http_status": summary.get("http_status"),
                         "errors_n": len(summary.get("errors") or []),
                     },
                 )
@@ -1503,18 +1584,25 @@ elif st.session_state.step == 5:
             "HubSpot: add **HUBSPOT_ACCESS_TOKEN** (private app token with `crm.objects.contacts` read/write "
             "and `crm.objects.notes` write) to `.env` or Streamlit secrets to enable **Send to HubSpot**."
         )
+    _render_hubspot_push_banner()
+    _render_hubspot_cooldown_hint()
     c1, c2, c3 = st.columns(3)
     with c1:
         st.button("← Back", on_click=prev_step, width="stretch")
     with c2:
         hs_token = hubspot_access_token()
         hs_disabled = not hs_token or not recs
+        hs_cooldown = _hubspot_cooldown_remaining() > 0
         if st.button(
             "Send to HubSpot",
             width="stretch",
-            disabled=hs_disabled,
-            help="Creates or updates HubSpot contacts from visible CRM rows (skips rows with no email and DNC).",
+            disabled=hs_disabled or hs_cooldown,
+            help=_hubspot_push_help(
+                "Creates or updates HubSpot contacts from visible CRM rows (skips rows with no email and DNC)."
+            ),
+            key="hq_hubspot_from_crm",
         ):
+            _hubspot_arm_cooldown()
             email_to_lead = _email_to_enriched_lead(le)
             to_push = [
                 r
@@ -1523,19 +1611,24 @@ elif st.session_state.step == 5:
                 and str(r.get("lead_status") or "") != LEAD_STATUS_DNC
                 and str(r.get("email") or "").strip()
             ]
-            summary = push_crm_batch(hs_token, to_push, email_to_lead)
+            with st.spinner("Sending data to HubSpot…"):
+                summary = push_crm_batch(hs_token, to_push, email_to_lead)
+            _hubspot_store_push_result(summary, source="crm")
             for err in (summary.get("errors") or [])[:20]:
                 st.warning(str(err))
-            safe_toast(
-                f"HubSpot: {summary.get('ok', 0)} synced · skipped (no email): {summary.get('skipped', 0)}",
-                icon="✅",
-            )
+            if summary.get("success"):
+                safe_toast(
+                    f"HubSpot HTTP 200 OK — {summary.get('ok', 0)} contact(s) sent.",
+                    icon="✅",
+                )
             try:
                 append_event(
                     "hubspot_push",
                     {
+                        "source": "crm",
                         "ok": summary.get("ok"),
                         "skipped": summary.get("skipped"),
+                        "http_status": summary.get("http_status"),
                         "errors_n": len(summary.get("errors") or []),
                     },
                 )

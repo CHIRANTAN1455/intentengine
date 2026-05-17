@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Smoke-test external HTTP APIs used by IntentEngine (ip-api, LLM stack, NocoDB).
+Smoke-test external HTTP APIs used by IntentEngine before client handoff.
 
-Run from repo root:
-  python3 scripts/api_smoke_test.py
+Run from repo root (use Python 3.10+ venv):
+  .venv/bin/python scripts/api_smoke_test.py
 
-Loads `.env` via config when importing project modules. Exit 0 if no hard failures
-(optional credentials missing → SKIP, not fail).
+Checks: compileall, imports, ip-api, LLM (Anthropic + OpenAI), NocoDB, Apollo,
+HubSpot, python-jobspy (Indeed sample). Loads `.env` via config on import.
+Exit 0 if no hard failures (optional credentials missing → SKIP, not fail).
 """
 
 from __future__ import annotations
@@ -113,6 +114,83 @@ def _nocodb_table_id_placeholder(table_id: str) -> bool:
     return not t or "replace" in t or t.endswith("_table_id") or t == "tbl"
 
 
+def step_apollo() -> bool:
+    from apollo_enrichment import apollo_contact_enrichment_available, apollo_quick_probe
+
+    if not apollo_contact_enrichment_available():
+        log("Apollo.io (people search)", "SKIP", "APOLLO_API_KEY not set")
+        return True
+    ok, msg = apollo_quick_probe()
+    log("Apollo.io (people search)", "PASS" if ok else "FAIL", msg)
+    return ok
+
+
+def step_hubspot() -> bool:
+    import requests
+
+    from config import hubspot_access_token, hubspot_configured
+
+    if not hubspot_configured():
+        log("HubSpot CRM API", "SKIP", "HUBSPOT_ACCESS_TOKEN / HUBSPOT_PRIVATE_APP_TOKEN not set")
+        return True
+    token = hubspot_access_token()
+    try:
+        r = requests.get(
+            "https://api.hubapi.com/crm/v3/objects/contacts",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": 1},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        log("HubSpot CRM API", "FAIL", f"network: {exc}")
+        return False
+    if r.status_code in (401, 403):
+        log("HubSpot CRM API", "FAIL", f"HTTP {r.status_code}: token rejected")
+        return False
+    if r.status_code >= 400:
+        log("HubSpot CRM API", "FAIL", f"HTTP {r.status_code}: {r.text[:240]}")
+        return False
+    log("HubSpot CRM API", "PASS", f"HTTP {r.status_code} — contacts endpoint reachable")
+    return True
+
+
+def step_jobspy() -> bool:
+    from internal_intent import jobspy_runtime_status
+
+    js = jobspy_runtime_status()
+    if not js.get("python_ok"):
+        log("python-jobspy (Indeed/LinkedIn)", "FAIL", js.get("hint") or js.get("error"))
+        return False
+    if not js.get("jobspy_ok"):
+        log("python-jobspy (Indeed/LinkedIn)", "FAIL", js.get("error") or "import failed")
+        return False
+
+    try:
+        from jobspy import scrape_jobs
+    except Exception as exc:
+        log("python-jobspy (Indeed/LinkedIn)", "FAIL", str(exc))
+        return False
+
+    try:
+        df = scrape_jobs(
+            site_name=["indeed"],
+            search_term="account executive",
+            location="United States",
+            results_wanted=5,
+            hours_old=24 * 14,
+            country_indeed="usa",
+        )
+    except Exception as exc:
+        log("Indeed live scrape (jobspy)", "FAIL", str(exc)[:240])
+        return False
+    n = 0 if df is None else len(df)
+    if n == 0:
+        log("Indeed live scrape (jobspy)", "WARN", "0 rows — board may be throttling; runtime import OK")
+        return True
+    log("Indeed live scrape (jobspy)", "PASS", f"{n} listing(s) returned")
+    return True
+
+
 def step_nocodb() -> bool:
     try:
         from config import get_nocodb_settings
@@ -147,6 +225,9 @@ def main() -> int:
     ok = step_ip_api() and ok
     ok = step_llm() and ok
     ok = step_nocodb() and ok
+    ok = step_apollo() and ok
+    ok = step_hubspot() and ok
+    ok = step_jobspy() and ok
     print("---")
     print("Summary")
     for step, status, detail in REPORT:
