@@ -1,10 +1,12 @@
-"""Premium visual system for hirequity (Streamlit-injected CSS)."""
+"""Premium visual system for IntentEngine client deployments (Streamlit CSS)."""
 from __future__ import annotations
 
 import math
 from html import escape
 
-BRAND = "hirequity"
+from client_profiles import get_active_profile
+
+BRAND = get_active_profile().brand
 
 # Tiny scene: night skyline + rising “intent” bars (72×32, crisp-edge rects).
 _WELCOME_PIXEL_SVG = """
@@ -120,11 +122,32 @@ def get_global_css() -> str:
   }
   [data-baseweb="input"] input, div[data-baseweb="input"] {
     color: var(--hq-text) !important;
+    -webkit-text-fill-color: var(--hq-text) !important;
+    caret-color: var(--hq-text) !important;
   }
 
-  .stTextInput > div > div, .stTextInput input {
-    background: var(--hq-surface) !important;
+  .stTextInput > div > div {
+    background: rgba(15, 23, 42, 0.55) !important;
+    color-scheme: dark;
+  }
+  .stTextInput input {
+    background: transparent !important;
     color: var(--hq-text) !important;
+    -webkit-text-fill-color: var(--hq-text) !important;
+    caret-color: var(--hq-text) !important;
+  }
+  @media (prefers-color-scheme: light) {
+    [data-baseweb="input"] > div, .stTextInput > div > div {
+      background: #eef2f7 !important;
+      border-color: rgba(15, 23, 42, 0.18) !important;
+      color-scheme: light;
+    }
+    [data-baseweb="input"] input, div[data-baseweb="input"],
+    .stTextInput input {
+      color: #0f172a !important;
+      -webkit-text-fill-color: #0f172a !important;
+      caret-color: #0f172a !important;
+    }
   }
 
   /* Buttons */
@@ -694,17 +717,39 @@ def get_login_css() -> str:
   .hq-login-status--err { color: #fda4af !important; }
 
   [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput > div > div {
-    background: rgba(255, 255, 255, 0.04) !important;
+    background: rgba(15, 23, 42, 0.72) !important;
     border: 1px solid rgba(148, 163, 184, 0.35) !important;
     border-radius: 12px !important;
+    color-scheme: dark;
   }
   [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput input {
+    background: transparent !important;
     color: #f8fafc !important;
+    -webkit-text-fill-color: #f8fafc !important;
+    caret-color: #f8fafc !important;
     font-family: 'DM Mono', ui-monospace, monospace !important;
     font-size: 0.88rem !important;
   }
   [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput input::placeholder {
     color: #64748b !important;
+    -webkit-text-fill-color: #64748b !important;
+    opacity: 1;
+  }
+  @media (prefers-color-scheme: light) {
+    [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput > div > div {
+      background: #eef2f7 !important;
+      border-color: rgba(15, 23, 42, 0.22) !important;
+      color-scheme: light;
+    }
+    [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput input {
+      color: #0f172a !important;
+      -webkit-text-fill-color: #0f172a !important;
+      caret-color: #0f172a !important;
+    }
+    [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stTextInput input::placeholder {
+      color: #64748b !important;
+      -webkit-text-fill-color: #64748b !important;
+    }
   }
   [data-testid="stAppViewContainer"]:has(.hq-login-marker) .stButton > button,
   [data-testid="stAppViewContainer"]:has(.hq-login-marker) [data-testid="baseButton-primary"] {
@@ -756,9 +801,10 @@ def render_login_mesh_component() -> None:
 
 
 def render_login_headline() -> str:
-    return """
+    p = get_active_profile()
+    return f"""
     <p class="hq-login-kicker">Secure access</p>
-    <h1 class="hq-login-title">Welcome to <em>hirequity</em></h1>
+    <h1 class="hq-login-title">{p.login_brand_html}</h1>
     <p class="hq-login-byline">Powered by <strong>ELV8 AI</strong></p>
     <p class="hq-login-byline-sub">Engines by <strong>Sledopyt AI</strong></p>
     """
@@ -766,7 +812,10 @@ def render_login_headline() -> str:
 
 def render_client_welcome(brand: str) -> str:
     """Full-width animated welcome panel (use with get_global_css already on the page)."""
+    p = get_active_profile()
     safe = escape(brand)
+    line1, line2, line3 = p.pixel_story_lines
+    line3 = line3.format(brand=safe)
     return f"""
     <div class="hq-welcome-wrap">
       <div class="hq-welcome-orbs" aria-hidden="true">
@@ -778,20 +827,19 @@ def render_client_welcome(brand: str) -> str:
         <span class="hq-welcome-kicker">Welcome</span>
         <h1 class="hq-welcome-title">{safe}</h1>
         <p class="hq-welcome-lead">
-          Your live hiring-intent workspace is warming up in the background — job boards, scoring,
-          and pipeline context — so when you step in, the first rows are already in motion.
+          {escape(p.welcome_lead)}
         </p>
         <div class="hq-pixel-panel">
           <div class="hq-pixel-frame">{_WELCOME_PIXEL_SVG}</div>
           <div class="hq-pixel-tale">
             <p class="hq-pixel-line">
-              <strong>02:14</strong> — Another sales role hits the wire. The city pretends to sleep.
+              <strong>02:14</strong> — {escape(line1)}
             </p>
             <p class="hq-pixel-line">
-              Miles away, a stack blinks: signals stack, tiers settle, someone worth the ping appears.
+              {escape(line2)}
             </p>
             <p class="hq-pixel-line">
-              <strong>{safe}</strong> is the quiet layer that turns that noise into a room you can own.
+              <strong>{line3}</strong>
             </p>
           </div>
         </div>
@@ -804,11 +852,12 @@ def render_client_welcome(brand: str) -> str:
 
 
 def render_hero(brand: str) -> str:
+    sub = escape(get_active_profile().hero_subtitle)
     return f"""
     <div class="hq-hero">
       <span class="hq-eyebrow">Client command center</span>
-      <h1 class="hq-title">{brand}</h1>
-      <p class="hq-sub">Single pipeline: hiring intent, waterfall enrichment, email + Walego, reply intelligence, and CRM with live performance you can present in the room.</p>
+      <h1 class="hq-title">{escape(brand)}</h1>
+      <p class="hq-sub">{sub}</p>
     </div>
     """
 
