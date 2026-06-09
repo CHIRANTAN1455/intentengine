@@ -155,6 +155,13 @@ def seed_post_enrich_row(
     li = str(lead.get("LinkedIn", "") or "").strip()
     if not enrichment_verified and li and not job_board_linkedin_safe(li):
         li = ""
+    hiring_role = str(lead.get("Hiring role", "") or "").strip()
+    contact_title = ""
+    if enrichment_verified:
+        contact_title = str(lead.get("Title", "") or "").strip()
+        if contact_title and hiring_role and contact_title == hiring_role:
+            # Pre-Apollo rows duplicate posting text in Title; keep blank until distinct.
+            contact_title = ""
     return {
         "id": _id_for(lead),
         "name": str(lead.get("Name", "") or ""),
@@ -162,10 +169,11 @@ def seed_post_enrich_row(
         "email": email_addr,
         "linkedin": li,
         "phone": str(lead.get("Phone", "") or "") if enrichment_verified else "",
+        "contact_title": contact_title,
         "intent_reason": str(lead.get("Intent reason", "") or ""),
         "intent_score": score,
         "intent_tier": str(lead.get("Intent tier", "") or ""),
-        "hiring_role": str(lead.get("Hiring role", "") or ""),
+        "hiring_role": hiring_role,
         "lead_status": lead_status,
         "outreach_lock": OUTREACH_LOCK_ACTIVE if contact_verified else OUTREACH_LOCK_RELEASED,
         "assigned_sdr": (assigned_sdr or "").strip() or "Unassigned",
@@ -379,6 +387,7 @@ CRM_DF_COLUMNS: tuple[str, ...] = (
     "email",
     "linkedin",
     "phone",
+    "contact_title",
     "hiring_role",
     "intent_reason",
     "intent_score",

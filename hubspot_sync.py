@@ -159,15 +159,54 @@ def _create_note_on_contact(token: str, contact_id: str, body_text: str) -> None
         raise RuntimeError(f"HubSpot create note failed ({r.status_code}): {r.text[:800]}")
 
 
+def _hiring_role_text(crm: dict[str, Any], lead: dict[str, Any] | None) -> str:
+    role = str(crm.get("hiring_role") or "").strip()
+    if not role and lead:
+        role = str(lead.get("Hiring role") or "").strip()
+    return role
+
+
+def _person_title_text(crm: dict[str, Any], lead: dict[str, Any] | None) -> str:
+    """Decision-maker title at the company (Apollo Title), not the open job posting."""
+    title = str(crm.get("contact_title") or "").strip()
+    if not title and lead:
+        title = str(lead.get("Title") or "").strip()
+    if not title:
+        return ""
+    hiring = _hiring_role_text(crm, lead)
+    if hiring and title == hiring:
+        return ""
+    return title
+
+
+def _linkedin_profile_url(crm: dict[str, Any], lead: dict[str, Any] | None) -> str:
+    for src in (crm, lead or {}):
+        li = str(src.get("linkedin") or src.get("LinkedIn") or "").strip()
+        if not li:
+            continue
+        low = li.lower()
+        if "/in/" in low:
+            return li
+        if bool(crm.get("enrichment_verified")):
+            return li
+    return ""
+
+
 def _build_note_body(crm: dict[str, Any], lead: dict[str, Any] | None) -> str:
     lines: list[str] = []
     lines.append("— IntentEngine / hirequity —")
     co = str(crm.get("company") or "").strip()
     if co:
         lines.append(f"Company: {co}")
-    role = str(crm.get("hiring_role") or "").strip()
-    if role:
-        lines.append(f"Hiring role (posting): {role}")
+    li = _linkedin_profile_url(crm, lead)
+    if li:
+        lines.append(f"LinkedIn profile: {li}")
+    position = _person_title_text(crm, lead)
+    if position:
+        lines.append(f"Role (position in company): {position}")
+    hiring = _hiring_role_text(crm, lead)
+    if hiring:
+        lines.append(f"Hiring for: {hiring}")
     ir = str(crm.get("intent_reason") or "").strip()
     if ir:
         lines.append(f"Intent / signals: {ir}")
@@ -205,18 +244,19 @@ def _contact_properties(
     first: str,
     last: str,
     email: str,
+    lead: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     phone = str(crm.get("phone") or "").strip()
     company = str(crm.get("company") or "").strip()
-    li = str(crm.get("linkedin") or "").strip()
-    hiring = str(crm.get("hiring_role") or "").strip()
+    li = _linkedin_profile_url(crm, lead) or str(crm.get("linkedin") or "").strip()
+    person_title = _person_title_text(crm, lead)
     props: dict[str, str] = {
         "email": email,
         "firstname": first,
         "lastname": last or first or "Unknown",
         "company": company,
         "phone": phone,
-        "jobtitle": hiring[:255] if hiring else "",
+        "jobtitle": person_title[:255] if person_title else "",
     }
     if li:
         # Standard on most Sales/Marketing portals; omitted if empty.
@@ -241,7 +281,7 @@ def upsert_contact_with_note(
 
     full_name = str(crm_record.get("name") or "").strip()
     first, last = _split_name(full_name)
-    props = _contact_properties(crm_record, first, last, email)
+    props = _contact_properties(crm_record, first, last, email, lead_row)
 
     existing = search_contact_id_by_email(token, email)
     note_body = _build_note_body(crm_record, lead_row)
