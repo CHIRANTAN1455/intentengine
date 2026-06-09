@@ -299,6 +299,17 @@ def prev_step():
         st.session_state.role_suggestions = None
 
 
+def render_back_button(label: str = "← Back", *, disabled: bool = False, key: str | None = None) -> None:
+    """Step navigation — always rendered at the top of each pipeline step."""
+    kwargs: dict[str, Any] = {"width": "stretch"}
+    if key:
+        kwargs["key"] = key
+    if disabled:
+        st.button(label, disabled=True, **kwargs)
+    else:
+        st.button(label, on_click=prev_step, **kwargs)
+
+
 def _outreach_lead_strip_unverified_linkedin(lead: pd.Series) -> pd.Series:
     """Drop LinkedIn **person** URLs until verified; keep board job/company links."""
     out = lead.copy()
@@ -1012,6 +1023,7 @@ st.markdown(render_stepper(st.session_state.step), unsafe_allow_html=True)
 
 # --- STEP 0: INTENT ---
 if st.session_state.step == 0:
+    render_back_button("Back", disabled=True, key="hq_back_step0")
     st.markdown(
         section_header(
             "Intent engine",
@@ -1081,13 +1093,9 @@ if st.session_state.step == 0:
         except NocoDBError as exc:
             st.error(str(exc))
     st.caption("Requires `NOCODB_*` in `.env` or Streamlit secrets; uses `NOCODB_PIPELINE_TABLE_ID`.")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.button("Back", disabled=True, width="stretch")
-    with c2:
-        if st.button("Continue to scoring →", type="primary", width="stretch"):
-            st.session_state.step = 1
-            st.rerun()
+    if st.button("Continue to scoring →", type="primary", width="stretch"):
+        st.session_state.step = 1
+        st.rerun()
     if st.button("Refresh intent (live job boards)", width="stretch"):
         invalidate_intent_corpus_cache()
         st.session_state.company_jobs = None
@@ -1098,6 +1106,7 @@ if st.session_state.step == 0:
 
 # --- STEP 1: SCORING ---
 elif st.session_state.step == 1:
+    render_back_button(key="hq_back_step1")
     st.markdown(
         section_header(
             "Scoring & gate",
@@ -1116,17 +1125,14 @@ elif st.session_state.step == 1:
     with m2:
         st.metric("Intent focus", "Quality over volume")
     st.session_state._ready_for_enrich = ready
-    c1, c2 = st.columns(2)
-    with c1:
-        st.button("← Back", on_click=prev_step, width="stretch")
-    with c2:
-        if st.button("Run enrichment →", type="primary", width="stretch", key="hq_goto_enrich"):
-            st.session_state.step = 2
-            st.session_state._ready_for_enrich = ready
-            st.rerun()
+    if st.button("Run enrichment →", type="primary", width="stretch", key="hq_goto_enrich"):
+        st.session_state.step = 2
+        st.session_state._ready_for_enrich = ready
+        st.rerun()
 
 # --- STEP 2: ENRICHMENT ---
 elif st.session_state.step == 2:
+    render_back_button(key="hq_back_step2")
     _enrich_help = (
         "Job-board signals (titles, URLs) always come from the live scrape. "
         f"**Apollo is enabled** — up to **{enrichment_max_companies_per_run()}** companies per run get "
@@ -1255,10 +1261,8 @@ elif st.session_state.step == 2:
     st.markdown("</div>", unsafe_allow_html=True)
     _render_hubspot_push_banner()
     _render_hubspot_cooldown_hint()
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        st.button("← Back", on_click=prev_step, width="stretch")
-    with c2:
         le_btn = st.session_state.leads_enriched
         hs_ok = (
             hubspot_configured()
@@ -1307,7 +1311,7 @@ elif st.session_state.step == 2:
             except NocoDBError:
                 pass
             st.rerun()
-    with c3:
+    with c2:
         le_push = st.session_state.leads_enriched
         can_push_crm = isinstance(le_push, pd.DataFrame) and not le_push.empty
         if st.button(
@@ -1328,6 +1332,7 @@ elif st.session_state.step == 2:
 
 # --- STEP 3: OUTREACH ---
 elif st.session_state.step == 3:
+    render_back_button(key="hq_back_step3")
     st.markdown(
         section_header(
             "Outreach",
@@ -1341,7 +1346,6 @@ elif st.session_state.step == 3:
     le = st.session_state.leads_enriched
     if le is None or le.empty:
         st.warning("Complete enrichment first.")
-        st.button("← Back", on_click=prev_step, width="stretch")
     else:
         ib = InboxStatus(inbox_id="inbox-1", sent_today=st.session_state.emails_sent_count)
         st.markdown(
@@ -1474,17 +1478,14 @@ elif st.session_state.step == 3:
                     "<p class=\"meta\">Walego handoff withheld until a verified contact is attached.</p></div>"
                 )
             st.markdown("".join(blocks), unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.button("← Back", on_click=prev_step, width="stretch")
-        with c2:
-            if st.button("Classify replies →", type="primary", width="stretch"):
-                st.session_state.replies_built = False
-                st.session_state.step = 4
-                st.rerun()
+        if st.button("Classify replies →", type="primary", width="stretch"):
+            st.session_state.replies_built = False
+            st.session_state.step = 4
+            st.rerun()
 
 # --- STEP 4: REPLIES ---
 elif st.session_state.step == 4:
+    render_back_button(key="hq_back_step4")
     st.markdown(
         section_header(
             "Reply intelligence",
@@ -1540,16 +1541,13 @@ elif st.session_state.step == 4:
         rdf = pd.DataFrame(st.session_state.replies)
         cols = [c for c in ("name", "text", "label", "email") if c in rdf.columns]
         st.dataframe(rdf[cols], width="stretch", hide_index=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.button("← Back", on_click=prev_step, width="stretch")
-    with c2:
-        if st.button("Sync CRM state →", type="primary", width="stretch"):
-            st.session_state.step = 5
-            st.rerun()
+    if st.button("Sync CRM state →", type="primary", width="stretch"):
+        st.session_state.step = 5
+        st.rerun()
 
 # --- STEP 5: CRM ---
 elif st.session_state.step == 5:
+    render_back_button(key="hq_back_step5")
     st.markdown(
         section_header(
             "CRM (in-house + HubSpot)",
@@ -1586,10 +1584,8 @@ elif st.session_state.step == 5:
         )
     _render_hubspot_push_banner()
     _render_hubspot_cooldown_hint()
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        st.button("← Back", on_click=prev_step, width="stretch")
-    with c2:
         hs_token = hubspot_access_token()
         hs_disabled = not hs_token or not recs
         hs_cooldown = _hubspot_cooldown_remaining() > 0
@@ -1635,13 +1631,14 @@ elif st.session_state.step == 5:
             except NocoDBError:
                 pass
             st.rerun()
-    with c3:
+    with c2:
         if st.button("View dashboard →", type="primary", width="stretch"):
             st.session_state.step = 6
             st.rerun()
 
 # --- STEP 6: DASHBOARD ---
 else:
+    render_back_button("← Back to CRM", key="hq_back_step6")
     st.markdown(
         section_header(
             "Live performance",
@@ -1728,4 +1725,3 @@ else:
         ),
         unsafe_allow_html=True,
     )
-    st.button("← Back to CRM", on_click=prev_step, width="stretch")

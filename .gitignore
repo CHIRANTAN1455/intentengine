@@ -4,3 +4,4 @@ __pycache__/
 config.toml
 streamlit.cloud.secrets.toml
 .venv/
+.DS_Store
