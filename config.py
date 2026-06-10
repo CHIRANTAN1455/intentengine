@@ -236,9 +236,18 @@ def enrichment_max_companies_per_run() -> int:
 
 
 def enrichment_request_delay_seconds() -> float:
-    """Pause between Apollo calls to respect rate limits."""
-    raw = (_lookup_str("ENRICHMENT_REQUEST_DELAY_SECONDS", "0.35") or "0.35").strip()
+    """Pause between Apollo calls when running sequentially (ignored for parallel runs)."""
+    raw = (_lookup_str("ENRICHMENT_REQUEST_DELAY_SECONDS", "0.08") or "0.08").strip()
     try:
         return max(0.0, float(raw))
     except ValueError:
-        return 0.35
+        return 0.08
+
+
+def enrichment_parallel_workers() -> int:
+    """Concurrent Apollo lookups per enrichment run (speed vs rate limits)."""
+    raw = (_lookup_str("ENRICHMENT_PARALLEL_WORKERS", "5") or "5").strip()
+    try:
+        return max(1, min(int(raw), 12))
+    except ValueError:
+        return 5

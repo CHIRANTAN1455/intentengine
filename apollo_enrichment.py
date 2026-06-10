@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import requests
@@ -30,6 +31,7 @@ from config import (
     apollo_api_key,
     apollo_phone_webhook_url,
     enrichment_max_companies_per_run,
+    enrichment_parallel_workers,
     enrichment_request_delay_seconds,
 )
 
@@ -280,6 +282,31 @@ def fetch_apollo_contact_for_company(
     }
 
 
+def _merge_apollo_contact(row: dict[str, Any], contact: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(row)
+    if contact:
+        merged["Name"] = contact["name"]
+        merged["Title"] = contact["title"] or merged.get("Title", "")
+        merged["Email"] = contact["email"]
+        merged["Phone"] = contact["phone"]
+        if contact.get("linkedin"):
+            merged["LinkedIn"] = contact["linkedin"]
+        merged["Enrichment verified"] = True
+        merged["Contact source"] = "apollo"
+        merged["Contact status"] = "Verified (Apollo)"
+    else:
+        merged.setdefault("Contact source", "")
+    return merged
+
+
+def _apollo_enrich_row(row: dict[str, Any]) -> dict[str, Any]:
+    contact = fetch_apollo_contact_for_company(
+        str(row.get("Company") or ""),
+        str(row.get("Hiring role") or row.get("Title") or "") or None,
+    )
+    return _merge_apollo_contact(row, contact)
+
+
 def run_apollo_waterfall_on_dataframe(
     df_rows: list[dict[str, Any]],
     *,
@@ -289,34 +316,39 @@ def run_apollo_waterfall_on_dataframe(
     if not apollo_contact_enrichment_available():
         return df_rows
     _set_last_error("")
-    delay = enrichment_request_delay_seconds()
     cap = enrichment_max_companies_per_run()
-    total = min(len(df_rows), cap)
-    out: list[dict[str, Any]] = []
-    for i, row in enumerate(df_rows):
-        if i >= cap:
-            out.append(row)
-            continue
-        if on_progress:
-            on_progress(i + 1, total, str(row.get("Company") or ""))
-        contact = fetch_apollo_contact_for_company(
-            str(row.get("Company") or ""),
-            str(row.get("Hiring role") or row.get("Title") or "") or None,
-        )
-        merged = dict(row)
-        if contact:
-            merged["Name"] = contact["name"]
-            merged["Title"] = contact["title"] or merged.get("Title", "")
-            merged["Email"] = contact["email"]
-            merged["Phone"] = contact["phone"]
-            if contact.get("linkedin"):
-                merged["LinkedIn"] = contact["linkedin"]
-            merged["Enrichment verified"] = True
-            merged["Contact source"] = "apollo"
-            merged["Contact status"] = "Verified (Apollo)"
-        else:
-            merged.setdefault("Contact source", "")
-        out.append(merged)
-        if delay > 0 and i < min(len(df_rows), cap) - 1:
-            time.sleep(delay)
-    return out
+    workers = enrichment_parallel_workers()
+    delay = enrichment_request_delay_seconds()
+    batch = df_rows[:cap]
+    tail = df_rows[cap:]
+    total = len(batch)
+    if total == 0:
+        return list(df_rows)
+
+    enriched: list[dict[str, Any] | None] = [None] * total
+
+    if workers <= 1:
+        for i, row in enumerate(batch):
+            if on_progress:
+                on_progress(i + 1, total, str(row.get("Company") or ""))
+            enriched[i] = _apollo_enrich_row(row)
+            if delay > 0 and i < total - 1:
+                time.sleep(delay)
+    else:
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_map = {
+                pool.submit(_apollo_enrich_row, row): i for i, row in enumerate(batch)
+            }
+            for fut in as_completed(future_map):
+                idx = future_map[fut]
+                enriched[idx] = fut.result()
+                done += 1
+                if on_progress:
+                    on_progress(
+                        done,
+                        total,
+                        str((enriched[idx] or batch[idx]).get("Company") or ""),
+                    )
+
+    return [row for row in enriched if row is not None] + list(tail)

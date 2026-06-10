@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import math
 import time
@@ -36,6 +35,7 @@ from config import (
     REPLY_UNSUBSCRIBE,
     auto_save_pipeline_to_nocodb,
     enrichment_max_companies_per_run,
+    enrichment_parallel_workers,
     hubspot_access_token,
     hubspot_configured,
 )
@@ -49,7 +49,12 @@ from crm import (
 )
 from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
-build_email_sequence = importlib.import_module("email_engine").build_email_sequence
+from email_engine import (
+    OUTREACH_PLACEHOLDERS,
+    build_email_sequence,
+    default_sequence_templates,
+    outreach_lead_key,
+)
 from role_suggestions import role_based_suggestions
 from enrichment import (
     CONTACT_PENDING_STATUS,
@@ -269,6 +274,8 @@ if "crm_records" not in st.session_state:
     st.session_state.crm_records = []
 if "outreach_simulated" not in st.session_state:
     st.session_state.outreach_simulated = False
+if "outreach_templates" not in st.session_state:
+    st.session_state.outreach_templates = None
 if "replies_built" not in st.session_state:
     st.session_state.replies_built = False
 if "role_suggestions" not in st.session_state:
@@ -308,6 +315,100 @@ def render_back_button(label: str = "← Back", *, disabled: bool = False, key: 
         st.button(label, disabled=True, **kwargs)
     else:
         st.button(label, on_click=prev_step, **kwargs)
+
+
+def _active_outreach_templates() -> list[dict[str, Any]]:
+    tpls = st.session_state.get("outreach_templates")
+    if isinstance(tpls, list) and tpls:
+        return tpls
+    return default_sequence_templates()
+
+
+def _outreach_widget_prefix(lead_key: str, step: int, field: str) -> str:
+    return f"hq_out_{lead_key}_{step}_{field}"
+
+
+def _clear_outreach_lead_widgets() -> None:
+    drop = [k for k in st.session_state if str(k).startswith("hq_out_")]
+    for k in drop:
+        del st.session_state[k]
+
+
+def _seed_outreach_widgets_for_lead(lead: pd.Series, *, force: bool = False) -> None:
+    lk = outreach_lead_key(lead)
+    seq = build_email_sequence(lead, templates=_active_outreach_templates())
+    for em in seq:
+        step = int(em["step"])
+        sk = _outreach_widget_prefix(lk, step, "subj")
+        bk = _outreach_widget_prefix(lk, step, "body")
+        if force or sk not in st.session_state:
+            st.session_state[sk] = em["subject"]
+        if force or bk not in st.session_state:
+            st.session_state[bk] = em["body"]
+
+
+def _sequence_from_widgets(lead: pd.Series) -> list[dict[str, str]]:
+    lk = outreach_lead_key(lead)
+    base = build_email_sequence(lead, templates=_active_outreach_templates())
+    out: list[dict[str, str]] = []
+    for em in base:
+        step = int(em["step"])
+        sk = _outreach_widget_prefix(lk, step, "subj")
+        bk = _outreach_widget_prefix(lk, step, "body")
+        out.append(
+            {
+                "step": step,
+                "subject": str(st.session_state.get(sk, em["subject"])),
+                "body": str(st.session_state.get(bk, em["body"])),
+                "tone": em.get("tone", ""),
+            }
+        )
+    return out
+
+
+def _clear_outreach_template_widgets() -> None:
+    drop = [k for k in st.session_state if str(k).startswith("hq_tpl_")]
+    for k in drop:
+        del st.session_state[k]
+
+
+def _render_outreach_template_editor() -> None:
+    ph = ", ".join("{" + p + "}" for p in OUTREACH_PLACEHOLDERS)
+    with st.expander("Sequence templates (placeholders)", expanded=False):
+        st.caption(f"Use placeholders in templates: {ph}. Each lead below is pre-filled from these templates.")
+        tpls = _active_outreach_templates()
+        edited: list[dict[str, Any]] = []
+        for i, tpl in enumerate(tpls):
+            step = int(tpl["step"])
+            sk = f"hq_tpl_subj_{i}"
+            bk = f"hq_tpl_body_{i}"
+            if sk not in st.session_state:
+                st.session_state[sk] = str(tpl.get("subject") or "")
+            if bk not in st.session_state:
+                st.session_state[bk] = str(tpl.get("body") or "")
+            st.markdown(f"**Touch {step}**")
+            st.text_input("Subject template", key=sk, label_visibility="collapsed")
+            st.text_area("Body template", key=bk, height=120, label_visibility="collapsed")
+            edited.append(
+                {"step": step, "subject": st.session_state[sk], "body": st.session_state[bk]}
+            )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button("Save templates", width="stretch", key="hq_tpl_save"):
+                st.session_state.outreach_templates = edited
+                safe_toast("Templates saved.", icon="💾")
+        with c2:
+            if st.button("Apply to all leads", width="stretch", key="hq_tpl_apply"):
+                st.session_state.outreach_templates = edited
+                _clear_outreach_lead_widgets()
+                safe_toast("Templates applied — lead drafts refreshed.", icon="↻")
+                st.rerun()
+        with c3:
+            if st.button("Reset defaults", width="stretch", key="hq_tpl_reset"):
+                st.session_state.outreach_templates = None
+                _clear_outreach_lead_widgets()
+                _clear_outreach_template_widgets()
+                st.rerun()
 
 
 def _outreach_lead_strip_unverified_linkedin(lead: pd.Series) -> pd.Series:
@@ -404,6 +505,7 @@ def _payload_for_save() -> dict:
         "viewer_geo": _json_friendly_geo(st.session_state.get("_viewer_geo")),
         "outreach_tiers": list(st.session_state.get("outreach_tiers") or ["High", "Medium"]),
         "assigned_sdr_label": str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip(),
+        "outreach_templates": list(st.session_state.outreach_templates or []),
     }
 
 
@@ -477,7 +579,10 @@ def _hydrate_from_payload(payload: dict) -> None:
     al = payload.get("assigned_sdr_label")
     if isinstance(al, str) and al.strip():
         st.session_state.assigned_sdr_label = al.strip()
-
+    otpl = payload.get("outreach_templates")
+    if isinstance(otpl, list) and otpl:
+        st.session_state.outreach_templates = otpl
+        _clear_outreach_lead_widgets()
 
 def _viewer_geo_maybe_refresh() -> None:
     """Throttle IP geolocation lookups (ip-api.com) to once per hour per session."""
@@ -1135,9 +1240,9 @@ elif st.session_state.step == 2:
     render_back_button(key="hq_back_step2")
     _enrich_help = (
         "Job-board signals (titles, URLs) always come from the live scrape. "
-        f"**Apollo is enabled** — up to **{enrichment_max_companies_per_run()}** companies per run get "
-        "Name / Email / decision-maker Title / LinkedIn / phone (when Apollo returns them) via search + "
-        "``people/match``; this uses your Apollo credits."
+        f"**Apollo is enabled** — up to **{enrichment_max_companies_per_run()}** companies per run "
+        f"({enrichment_parallel_workers()} parallel lookups). Name / Email / Title / LinkedIn / phone "
+        "when Apollo returns them via search + ``people/match``."
         if apollo_contact_enrichment_available()
         else (
             "Job-board signals (titles, URLs) always come from the live scrape. "
@@ -1336,10 +1441,9 @@ elif st.session_state.step == 3:
     st.markdown(
         section_header(
             "Outreach",
-            "Sequences are built from deterministic templates so they render instantly and never "
-            "fabricate a recipient name. Dispatch only runs for leads with a verified contact "
-            "(**Enrichment verified** + non-empty Email). Everything else is held with status "
-            "**Awaiting verified contact** for SDR review.",
+            "Edit each touch below before dispatch. Templates use "
+            + ", ".join("{" + p + "}" for p in OUTREACH_PLACEHOLDERS)
+            + " filled from enrichment. Verified contacts only are logged on dispatch.",
         ),
         unsafe_allow_html=True,
     )
@@ -1347,32 +1451,20 @@ elif st.session_state.step == 3:
     if le is None or le.empty:
         st.warning("Complete enrichment first.")
     else:
+        _render_outreach_template_editor()
         ib = InboxStatus(inbox_id="inbox-1", sent_today=st.session_state.emails_sent_count)
         st.markdown(
-            f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability planning: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day.</div>",
+            f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day.</div>",
             unsafe_allow_html=True,
         )
         unverified_total = int((~le.apply(lead_has_verified_contact, axis=1)).sum()) if not le.empty else 0
         verified_total = len(le) - unverified_total if not le.empty else 0
         if unverified_total:
-            if apollo_contact_enrichment_available():
-                hint = (
-                    f"{unverified_total} lead(s) have no verified contact. Apollo is enabled but "
-                    "either it didn't have a match for these companies, or **enrichment was run "
-                    "before the key was set**. Go back to **Enrichment**, click **Clear stale "
-                    "enriched contacts** in the sidebar, then **Execute enrichment** again."
-                )
-            else:
-                hint = (
-                    f"{unverified_total} lead(s) have no verified contact and will be **held** "
-                    "from dispatch. Plug in a verified provider (Apollo / Hunter / ZoomInfo) "
-                    "or import a CSV with confirmed contacts before they will be sent."
-                )
-            st.warning(hint)
-        st.caption(
-            f"Dispatch will run for **{verified_total}** verified lead(s). "
-            "Drafts are still rendered below for every row so SDRs can review the messaging."
-        )
+            st.warning(f"{unverified_total} lead(s) missing verified contact — held from dispatch.")
+        st.caption(f"Dispatch logs **{verified_total}** verified lead(s) using the edited copy below.")
+
+        for _, _raw in le.iterrows():
+            _seed_outreach_widgets_for_lead(_outreach_lead_strip_unverified_linkedin(_raw))
 
         if st.button(
             "Log outreach dispatch to NocoDB",
@@ -1410,7 +1502,7 @@ elif st.session_state.step == 3:
                     if rec and rec.get("sequence_paused"):
                         skipped_high_intent.append(em_addr or em_key)
                         continue
-                    seq = build_email_sequence(lead)
+                    seq = _sequence_from_widgets(lead)
                     lead_sent = 0
                     for em in seq:
                         ok, msg = dispatch_email_internal(em_addr, em["subject"], em["body"])
@@ -1433,13 +1525,10 @@ elif st.session_state.step == 3:
                 if skipped_unverified:
                     sample = ", ".join(skipped_unverified[:8])
                     suffix = "…" if len(skipped_unverified) > 8 else ""
-                    st.info(
-                        f"{len(skipped_unverified)} lead(s) skipped — awaiting verified "
-                        f"contact: {sample}{suffix}"
-                    )
+                    st.info(f"{len(skipped_unverified)} lead(s) skipped (no verified contact): {sample}{suffix}")
                 if skipped_high_intent:
                     st.info(
-                        "High-intent hold: sequence paused until SDR review for: "
+                        "High-intent hold: "
                         + ", ".join(skipped_high_intent[:12])
                         + ("…" if len(skipped_high_intent) > 12 else "")
                     )
@@ -1447,37 +1536,34 @@ elif st.session_state.step == 3:
             lead = _outreach_lead_strip_unverified_linkedin(raw_lead)
             if str(lead.get("Email", "")) in st.session_state.blacklist:
                 continue
-            company_label = escape(str(lead.get("Company", "")))
+            company_label = str(lead.get("Company", "") or "")
             name_val = str(lead.get("Name", "") or "").strip()
+            role_val = str(lead.get("Hiring role") or lead.get("Title") or "").strip()
             verified = lead_has_verified_contact(lead)
-            if name_val and verified:
-                header = escape(name_val)
-                meta = f"{company_label} · Email-first sequence (max 3) + Walego handoff"
-            else:
-                header = company_label
-                meta = (
-                    f"{company_label} · <span style='color:#fbbf24;'>Awaiting verified contact</span> "
-                    "· sequence rendered for SDR preview only"
-                )
-            seq = build_email_sequence(lead)
-            blocks = [
-                '<div class="hq-lead">',
-                f"<h4>{header}</h4><div class=\"meta\">{meta}</div>",
-            ]
-            for em in seq:
-                blocks.append(
-                    f'<div class="email-draft-box"><b>Touch {em["step"]}</b> · {escape(em["subject"])}<br><br>{escape(em["body"])}</div>'
-                )
-            if verified:
-                blocks.append(
-                    f'<p class="meta">Walego JSON payload (execution layer)</p><pre style="font-size:0.75rem;opacity:0.9;">{escape(handoff_to_walego(lead))}</pre>'
-                )
-                blocks.append("<p class=\"meta\">Walego handoff generated (in-house payload).</p></div>")
-            else:
-                blocks.append(
-                    "<p class=\"meta\">Walego handoff withheld until a verified contact is attached.</p></div>"
-                )
-            st.markdown("".join(blocks), unsafe_allow_html=True)
+            _seed_outreach_widgets_for_lead(lead)
+            header = name_val if name_val and verified else company_label
+            status = "Verified" if verified else "Preview only"
+            with st.expander(f"{header} · {role_val or 'role TBD'} · {status}", expanded=verified):
+                for em in build_email_sequence(lead, templates=_active_outreach_templates()):
+                    step = int(em["step"])
+                    lk = outreach_lead_key(lead)
+                    st.markdown(f"**Touch {step}**")
+                    st.text_input(
+                        "Subject",
+                        key=_outreach_widget_prefix(lk, step, "subj"),
+                    )
+                    st.text_area(
+                        "Body",
+                        height=140,
+                        key=_outreach_widget_prefix(lk, step, "body"),
+                    )
+                if st.button(
+                    "Reset to templates",
+                    key=f"hq_out_reset_{outreach_lead_key(lead)}",
+                    width="stretch",
+                ):
+                    _seed_outreach_widgets_for_lead(lead, force=True)
+                    st.rerun()
         if st.button("Classify replies →", type="primary", width="stretch"):
             st.session_state.replies_built = False
             st.session_state.step = 4
