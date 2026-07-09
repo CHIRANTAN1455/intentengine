@@ -21,6 +21,11 @@ from apollo_enrichment import (
     apollo_last_error,
     apollo_quick_probe,
 )
+from mailersend_client import (
+    mailersend_last_error,
+    mailersend_quick_probe,
+    mailersend_send_test,
+)
 from config import (
     CORPUS_CA_JOB_SHARE,
     CORPUS_US_JOB_SHARE,
@@ -38,6 +43,8 @@ from config import (
     enrichment_parallel_workers,
     hubspot_access_token,
     hubspot_configured,
+    mailersend_configured,
+    mailersend_from_email,
 )
 from crm import (
     apply_blacklist_to_records,
@@ -1024,6 +1031,26 @@ with st.sidebar:
             st.success(msg)
         else:
             st.error(msg)
+    if mailersend_configured():
+        st.success(f"MailerSend: {mailersend_from_email()}", icon="🟢")
+    else:
+        st.warning("MailerSend: not configured (MAILERSEND_API_TOKEN + FROM_EMAIL)", icon="🟡")
+    if st.button("Test MailerSend API", width="stretch"):
+        ok, msg = mailersend_quick_probe()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+    if st.button("Send MailerSend test email", width="stretch"):
+        dest = str(st.session_state.get("test_email_in") or "").strip()
+        ok, msg = mailersend_send_test(dest)
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+    last_ms_err = mailersend_last_error()
+    if last_ms_err:
+        st.caption(f"Last MailerSend error: {last_ms_err[:180]}")
     le_now = st.session_state.get("leads_enriched")
     if isinstance(le_now, pd.DataFrame) and not le_now.empty and "Enrichment verified" in le_now.columns:
         n_ok = int(le_now["Enrichment verified"].astype(bool).sum())
@@ -1443,7 +1470,7 @@ elif st.session_state.step == 3:
             "Outreach",
             "Edit each touch below before dispatch. Templates use "
             + ", ".join("{" + p + "}" for p in OUTREACH_PLACEHOLDERS)
-            + " filled from enrichment. Verified contacts only are logged on dispatch.",
+            + " filled from enrichment. Verified contacts only are sent on dispatch.",
         ),
         unsafe_allow_html=True,
     )
@@ -1454,20 +1481,35 @@ elif st.session_state.step == 3:
         _render_outreach_template_editor()
         ib = InboxStatus(inbox_id="inbox-1", sent_today=st.session_state.emails_sent_count)
         st.markdown(
-            f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day.</div>",
+            f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day."
+            + (
+                f" · sender <code>{escape(mailersend_from_email())}</code>"
+                if mailersend_configured()
+                else " · MailerSend not configured (log-only in dev)"
+            )
+            + ".</div>",
             unsafe_allow_html=True,
         )
         unverified_total = int((~le.apply(lead_has_verified_contact, axis=1)).sum()) if not le.empty else 0
         verified_total = len(le) - unverified_total if not le.empty else 0
         if unverified_total:
             st.warning(f"{unverified_total} lead(s) missing verified contact — held from dispatch.")
-        st.caption(f"Dispatch logs **{verified_total}** verified lead(s) using the edited copy below.")
+        st.caption(
+            f"Dispatch sends to **{verified_total}** verified lead(s) via MailerSend when configured."
+            if mailersend_configured()
+            else f"Dispatch logs **{verified_total}** verified lead(s) (configure MailerSend to send for real)."
+        )
 
+        dispatch_label = (
+            "Dispatch outreach via MailerSend"
+            if mailersend_configured()
+            else "Log outreach dispatch to NocoDB"
+        )
         for _, _raw in le.iterrows():
             _seed_outreach_widgets_for_lead(_outreach_lead_strip_unverified_linkedin(_raw))
 
         if st.button(
-            "Log outreach dispatch to NocoDB",
+            dispatch_label,
             type="primary",
             width="stretch",
             disabled=verified_total == 0,
@@ -1477,7 +1519,7 @@ elif st.session_state.step == 3:
                 if not st.session_state.crm_records:
                     assigned = str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip() or "SDR Team"
                     st.session_state.crm_records = seed_crm_from_enriched(le, assigned, st.session_state.blacklist)
-                sent_count = 0
+                sent_count = st.session_state.emails_sent_count
                 w_req = 0
                 touches_by_email: dict[str, int] = {}
                 skipped_high_intent: list[str] = []
@@ -1505,11 +1547,17 @@ elif st.session_state.step == 3:
                     seq = _sequence_from_widgets(lead)
                     lead_sent = 0
                     for em in seq:
-                        ok, msg = dispatch_email_internal(em_addr, em["subject"], em["body"])
+                        ok, msg = dispatch_email_internal(
+                            em_addr,
+                            em["subject"],
+                            em["body"],
+                            sent_today=sent_count,
+                        )
                         if ok:
                             lead_sent += 1
+                            sent_count += 1
                         else:
-                            st.warning(f"Dispatch log failed for {em_addr}: {msg}")
+                            st.warning(f"Dispatch failed for {em_addr}: {msg}")
                             break
                     touches_by_email[em_key] = lead_sent
                     sent_count += lead_sent

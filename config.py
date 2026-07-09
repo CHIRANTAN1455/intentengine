@@ -216,6 +216,26 @@ def hubspot_configured() -> bool:
     return bool(hubspot_access_token())
 
 
+def mailersend_api_token() -> str:
+    """MailerSend API token for outbound email (optional in dev; required in production)."""
+    return (_lookup_str("MAILERSEND_API_TOKEN", "") or "").strip()
+
+
+def mailersend_from_email() -> str:
+    """Verified sender address on the MailerSend domain (e.g. hello@jobjord.com)."""
+    return (_lookup_str("MAILERSEND_FROM_EMAIL", "") or "").strip()
+
+
+def mailersend_from_name() -> str:
+    """Display name for the MailerSend from address."""
+    raw = (_lookup_str("MAILERSEND_FROM_NAME", "") or "").strip()
+    return raw or BRAND
+
+
+def mailersend_configured() -> bool:
+    return bool(mailersend_api_token() and mailersend_from_email())
+
+
 def apollo_api_key() -> str:
     """Master API key for Apollo people search + match (optional)."""
     return (_lookup_str("APOLLO_API_KEY", "") or "").strip()
