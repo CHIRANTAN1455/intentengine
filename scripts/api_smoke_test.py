@@ -6,7 +6,7 @@ Run from repo root (use Python 3.10+ venv):
   .venv/bin/python scripts/api_smoke_test.py
 
 Checks: compileall, imports, ip-api, LLM (Anthropic + OpenAI), NocoDB, Apollo,
-HubSpot, MailerSend, python-jobspy (Indeed sample). Loads `.env` via config on import.
+HubSpot, SmartLead, python-jobspy (Indeed sample). Loads `.env` via config on import.
 Exit 0 if no hard failures (optional credentials missing → SKIP, not fail).
 """
 
@@ -154,15 +154,15 @@ def step_hubspot() -> bool:
     return True
 
 
-def step_mailersend() -> bool:
-    from config import mailersend_configured
-    from mailersend_client import mailersend_quick_probe
+def step_smartlead() -> bool:
+    from config import smartlead_configured
+    from smartlead_client import smartlead_quick_probe
 
-    if not mailersend_configured():
-        log("MailerSend API", "SKIP", "MAILERSEND_API_TOKEN / MAILERSEND_FROM_EMAIL not set")
+    if not smartlead_configured():
+        log("SmartLead API", "SKIP", "SMARTLEAD_API_KEY not set")
         return True
-    ok, msg = mailersend_quick_probe()
-    log("MailerSend API", "PASS" if ok else "FAIL", msg)
+    ok, msg = smartlead_quick_probe()
+    log("SmartLead API", "PASS" if ok else "FAIL", msg)
     return ok
 
 
@@ -239,7 +239,7 @@ def main() -> int:
     ok = step_nocodb() and ok
     ok = step_apollo() and ok
     ok = step_hubspot() and ok
-    ok = step_mailersend() and ok
+    ok = step_smartlead() and ok
     ok = step_jobspy() and ok
     print("---")
     print("Summary")

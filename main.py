@@ -21,10 +21,10 @@ from apollo_enrichment import (
     apollo_last_error,
     apollo_quick_probe,
 )
-from mailersend_client import (
-    mailersend_last_error,
-    mailersend_quick_probe,
-    mailersend_send_test,
+from smartlead_client import (
+    smartlead_last_error,
+    smartlead_quick_probe,
+    smartlead_send_test,
 )
 from config import (
     CORPUS_CA_JOB_SHARE,
@@ -43,8 +43,8 @@ from config import (
     enrichment_parallel_workers,
     hubspot_access_token,
     hubspot_configured,
-    mailersend_configured,
-    mailersend_from_email,
+    smartlead_campaign_id,
+    smartlead_configured,
 )
 from crm import (
     apply_blacklist_to_records,
@@ -74,7 +74,7 @@ from enrichment import (
 from internal_intent import fetch_social_intent, invalidate_intent_corpus_cache, jobspy_runtime_status
 from user_geo import build_geo_hint_for_corpus, corpus_geo_cache_key
 from nocodb_rest import NocoDBError, find_snapshot_by_session, upsert_snapshot, append_event
-from outreach import dispatch_email_internal
+from outreach import dispatch_outreach_lead
 from pipeline import filter_outreach_ready, run_intent_stage
 from reply_classification import classify_reply_text, crm_eligible
 from ui_theme import (
@@ -1031,26 +1031,27 @@ with st.sidebar:
             st.success(msg)
         else:
             st.error(msg)
-    if mailersend_configured():
-        st.success(f"MailerSend: {mailersend_from_email()}", icon="🟢")
+    if smartlead_configured():
+        cid = smartlead_campaign_id() or "auto"
+        st.success(f"SmartLead: connected (campaign {cid})", icon="🟢")
     else:
-        st.warning("MailerSend: not configured (MAILERSEND_API_TOKEN + FROM_EMAIL)", icon="🟡")
-    if st.button("Test MailerSend API", width="stretch"):
-        ok, msg = mailersend_quick_probe()
+        st.warning("SmartLead: not configured (set SMARTLEAD_API_KEY)", icon="🟡")
+    if st.button("Test SmartLead API", width="stretch"):
+        ok, msg = smartlead_quick_probe()
         if ok:
             st.success(msg)
         else:
             st.error(msg)
-    if st.button("Send MailerSend test email", width="stretch"):
+    if st.button("Enroll SmartLead test lead", width="stretch"):
         dest = str(st.session_state.get("test_email_in") or "").strip()
-        ok, msg = mailersend_send_test(dest)
+        ok, msg = smartlead_send_test(dest)
         if ok:
             st.success(msg)
         else:
             st.error(msg)
-    last_ms_err = mailersend_last_error()
-    if last_ms_err:
-        st.caption(f"Last MailerSend error: {last_ms_err[:180]}")
+    last_sl_err = smartlead_last_error()
+    if last_sl_err:
+        st.caption(f"Last SmartLead error: {last_sl_err[:180]}")
     le_now = st.session_state.get("leads_enriched")
     if isinstance(le_now, pd.DataFrame) and not le_now.empty and "Enrichment verified" in le_now.columns:
         n_ok = int(le_now["Enrichment verified"].astype(bool).sum())
@@ -1483,9 +1484,9 @@ elif st.session_state.step == 3:
         st.markdown(
             f"<div class='hq-fade' style='margin-bottom:0.75rem;'>Deliverability: {escape(plan_capacity(ib.sent_today))} · cap {MAX_EMAILS_PER_INBOX_PER_DAY}/inbox/day."
             + (
-                f" · sender <code>{escape(mailersend_from_email())}</code>"
-                if mailersend_configured()
-                else " · MailerSend not configured (log-only in dev)"
+                " · provider <code>SmartLead</code>"
+                if smartlead_configured()
+                else " · SmartLead not configured (log-only in dev)"
             )
             + ".</div>",
             unsafe_allow_html=True,
@@ -1495,14 +1496,14 @@ elif st.session_state.step == 3:
         if unverified_total:
             st.warning(f"{unverified_total} lead(s) missing verified contact — held from dispatch.")
         st.caption(
-            f"Dispatch sends to **{verified_total}** verified lead(s) via MailerSend when configured."
-            if mailersend_configured()
-            else f"Dispatch logs **{verified_total}** verified lead(s) (configure MailerSend to send for real)."
+            f"Dispatch enrolls **{verified_total}** verified lead(s) into SmartLead when configured."
+            if smartlead_configured()
+            else f"Dispatch logs **{verified_total}** verified lead(s) (configure SmartLead to enroll for real)."
         )
 
         dispatch_label = (
-            "Dispatch outreach via MailerSend"
-            if mailersend_configured()
+            "Dispatch outreach via SmartLead"
+            if smartlead_configured()
             else "Log outreach dispatch to NocoDB"
         )
         for _, _raw in le.iterrows():
@@ -1545,22 +1546,23 @@ elif st.session_state.step == 3:
                         skipped_high_intent.append(em_addr or em_key)
                         continue
                     seq = _sequence_from_widgets(lead)
-                    lead_sent = 0
-                    for em in seq:
-                        ok, msg = dispatch_email_internal(
-                            em_addr,
-                            em["subject"],
-                            em["body"],
-                            sent_today=sent_count,
-                        )
-                        if ok:
-                            lead_sent += 1
-                            sent_count += 1
-                        else:
-                            st.warning(f"Dispatch failed for {em_addr}: {msg}")
-                            break
+                    ok, msg = dispatch_outreach_lead(
+                        em_addr,
+                        seq,
+                        full_name=str(lead.get("Name", "") or ""),
+                        company=str(lead.get("Company", "") or ""),
+                        phone=str(lead.get("Phone", "") or ""),
+                        linkedin=str(lead.get("LinkedIn", "") or lead.get("Linkedin", "") or ""),
+                        title=str(lead.get("Hiring role") or lead.get("Title") or ""),
+                        sent_today=sent_count,
+                    )
+                    if ok:
+                        lead_sent = len(seq)
+                        sent_count += 1
+                    else:
+                        st.warning(f"Dispatch failed for {em_addr}: {msg}")
+                        lead_sent = 0
                     touches_by_email[em_key] = lead_sent
-                    sent_count += lead_sent
                     w_req += 1
                 st.session_state.crm_records = apply_dispatch_to_records(
                     list(st.session_state.crm_records or []),

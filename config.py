@@ -216,24 +216,24 @@ def hubspot_configured() -> bool:
     return bool(hubspot_access_token())
 
 
-def mailersend_api_token() -> str:
-    """MailerSend API token for outbound email (optional in dev; required in production)."""
-    return (_lookup_str("MAILERSEND_API_TOKEN", "") or "").strip()
+def smartlead_api_key() -> str:
+    """SmartLead API key for cold outreach campaigns (optional in dev; required in production)."""
+    return (_lookup_str("SMARTLEAD_API_KEY", "") or "").strip()
 
 
-def mailersend_from_email() -> str:
-    """Verified sender address on the MailerSend domain (e.g. hello@jobjord.com)."""
-    return (_lookup_str("MAILERSEND_FROM_EMAIL", "") or "").strip()
+def smartlead_campaign_id() -> str:
+    """Optional campaign id. If blank, IntentEngine resolves/creates 'IntentEngine Outreach'."""
+    return (_lookup_str("SMARTLEAD_CAMPAIGN_ID", "") or "").strip()
 
 
-def mailersend_from_name() -> str:
-    """Display name for the MailerSend from address."""
-    raw = (_lookup_str("MAILERSEND_FROM_NAME", "") or "").strip()
-    return raw or BRAND
+def smartlead_campaign_name() -> str:
+    """Campaign name used when auto-creating / matching."""
+    raw = (_lookup_str("SMARTLEAD_CAMPAIGN_NAME", "") or "").strip()
+    return raw or "IntentEngine Outreach"
 
 
-def mailersend_configured() -> bool:
-    return bool(mailersend_api_token() and mailersend_from_email())
+def smartlead_configured() -> bool:
+    return bool(smartlead_api_key())
 
 
 def apollo_api_key() -> str:
