@@ -335,23 +335,28 @@ def _outreach_widget_prefix(lead_key: str, step: int, field: str) -> str:
     return f"hq_out_{lead_key}_{step}_{field}"
 
 
-def _clear_outreach_lead_widgets() -> None:
-    drop = [k for k in st.session_state if str(k).startswith("hq_out_")]
-    for k in drop:
-        del st.session_state[k]
-
-
 def _seed_outreach_widgets_for_lead(lead: pd.Series, *, force: bool = False) -> None:
     lk = outreach_lead_key(lead)
+    seeded_flag = f"hq_out_seeded_{lk}"
     seq = build_email_sequence(lead, templates=_active_outreach_templates())
+    already = bool(st.session_state.get(seeded_flag))
     for em in seq:
         step = int(em["step"])
         sk = _outreach_widget_prefix(lk, step, "subj")
         bk = _outreach_widget_prefix(lk, step, "body")
-        if force or sk not in st.session_state:
+        subj_empty = not str(st.session_state.get(sk, "") or "").strip()
+        body_empty = not str(st.session_state.get(bk, "") or "").strip()
+        if force or not already or sk not in st.session_state or subj_empty:
             st.session_state[sk] = em["subject"]
-        if force or bk not in st.session_state:
+        if force or not already or bk not in st.session_state or body_empty:
             st.session_state[bk] = em["body"]
+    st.session_state[seeded_flag] = True
+
+
+def _clear_outreach_lead_widgets() -> None:
+    drop = [k for k in st.session_state if str(k).startswith("hq_out_")]
+    for k in drop:
+        del st.session_state[k]
 
 
 def _sequence_from_widgets(lead: pd.Series) -> list[dict[str, str]]:
@@ -1494,7 +1499,15 @@ elif st.session_state.step == 3:
         unverified_total = int((~le.apply(lead_has_verified_contact, axis=1)).sum()) if not le.empty else 0
         verified_total = len(le) - unverified_total if not le.empty else 0
         if unverified_total:
-            st.warning(f"{unverified_total} lead(s) missing verified contact — held from dispatch.")
+            st.warning(
+                f"{unverified_total} lead(s) are **Preview only** — Apollo did not return a verified "
+                f"Name + Email yet. They still get draft Touch 1–3 copy (open the expander). "
+                f"Dispatch only sends the **{verified_total}** verified lead(s)."
+            )
+        st.caption(
+            f"Each lead below is **pre-filled** from sequence templates (company / role / greeting). "
+            f"Edit before dispatch. Verified = Apollo contact · Preview only = job signal without a sendable email."
+        )
         st.caption(
             f"Dispatch enrolls **{verified_total}** verified lead(s) into SmartLead when configured."
             if smartlead_configured()
@@ -1582,7 +1595,7 @@ elif st.session_state.step == 3:
                         + ", ".join(skipped_high_intent[:12])
                         + ("…" if len(skipped_high_intent) > 12 else "")
                     )
-        for _, raw_lead in le.iterrows():
+        for row_i, (_, raw_lead) in enumerate(le.iterrows()):
             lead = _outreach_lead_strip_unverified_linkedin(raw_lead)
             if str(lead.get("Email", "")) in st.session_state.blacklist:
                 continue
@@ -1591,10 +1604,23 @@ elif st.session_state.step == 3:
             role_val = str(lead.get("Hiring role") or lead.get("Title") or "").strip()
             verified = lead_has_verified_contact(lead)
             _seed_outreach_widgets_for_lead(lead)
+            seq_preview = _sequence_from_widgets(lead)
+            touch1_subj = str((seq_preview[0] if seq_preview else {}).get("subject") or "").strip()
             header = name_val if name_val and verified else company_label
             status = "Verified" if verified else "Preview only"
-            with st.expander(f"{header} · {role_val or 'role TBD'} · {status}", expanded=verified):
-                for em in build_email_sequence(lead, templates=_active_outreach_templates()):
+            subj_bit = f" · {touch1_subj[:48]}{'…' if len(touch1_subj) > 48 else ''}" if touch1_subj else " · (draft empty — click Reset)"
+            # Keep verified open; also open first few so drafts are obvious on first visit.
+            open_preview = (not verified) and row_i < 3
+            with st.expander(
+                f"{header} · {role_val or 'role TBD'} · {status}{subj_bit}",
+                expanded=verified or open_preview,
+            ):
+                if not verified:
+                    st.info(
+                        "Preview only — no verified Apollo email yet. Draft below is still pre-filled "
+                        "from templates for review; this lead is held from dispatch until verified."
+                    )
+                for em in seq_preview:
                     step = int(em["step"])
                     lk = outreach_lead_key(lead)
                     st.markdown(f"**Touch {step}**")

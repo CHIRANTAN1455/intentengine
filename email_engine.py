@@ -115,13 +115,21 @@ def apply_placeholders(text: str, ctx: Mapping[str, str]) -> str:
 
 
 def outreach_lead_key(lead: pd.Series | Mapping[str, Any]) -> str:
+    """Stable widget key for a lead. Prefer email; else company + role (avoids collisions)."""
     if not isinstance(lead, pd.Series):
         lead = pd.Series(dict(lead))
     em = str(lead.get("Email") or "").strip().lower()
     if em:
-        return em
-    slug = re.sub(r"[^a-z0-9]+", "_", str(lead.get("Company") or "lead").lower()).strip("_")
-    return slug or "lead"
+        return re.sub(r"[^a-z0-9@._+-]+", "_", em)
+    company = re.sub(r"[^a-z0-9]+", "_", str(lead.get("Company") or "lead").lower()).strip("_")
+    role = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(lead.get("Hiring role") or lead.get("Title") or lead.get("Role") or "").lower(),
+    ).strip("_")
+    intent = re.sub(r"[^a-z0-9]+", "_", str(lead.get("Intent reason") or "")[:40].lower()).strip("_")
+    parts = [p for p in (company or "lead", role, intent) if p]
+    return "_".join(parts)[:120] or "lead"
 
 
 def _normalize_templates(templates: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
