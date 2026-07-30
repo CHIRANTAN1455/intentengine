@@ -385,6 +385,15 @@ def _clear_outreach_template_widgets() -> None:
 
 
 def _render_outreach_template_editor() -> None:
+    # Defer Reset/Apply clears to the next run *before* widgets are created —
+    # mutating widget keys after instantiation raises StreamlitAPIException.
+    if st.session_state.pop("hq_tpl_do_reset", False):
+        st.session_state.outreach_templates = None
+        _clear_outreach_lead_widgets()
+        _clear_outreach_template_widgets()
+    if st.session_state.pop("hq_tpl_do_apply", False):
+        _clear_outreach_lead_widgets()
+
     ph = ", ".join("{" + p + "}" for p in OUTREACH_PLACEHOLDERS)
     with st.expander("Sequence templates (placeholders)", expanded=False):
         st.caption(f"Use placeholders in templates: {ph}. Each lead below is pre-filled from these templates.")
@@ -412,14 +421,12 @@ def _render_outreach_template_editor() -> None:
         with c2:
             if st.button("Apply to all leads", width="stretch", key="hq_tpl_apply"):
                 st.session_state.outreach_templates = edited
-                _clear_outreach_lead_widgets()
+                st.session_state.hq_tpl_do_apply = True
                 safe_toast("Templates applied — lead drafts refreshed.", icon="↻")
                 st.rerun()
         with c3:
             if st.button("Reset defaults", width="stretch", key="hq_tpl_reset"):
-                st.session_state.outreach_templates = None
-                _clear_outreach_lead_widgets()
-                _clear_outreach_template_widgets()
+                st.session_state.hq_tpl_do_reset = True
                 st.rerun()
 
 
@@ -1603,7 +1610,14 @@ elif st.session_state.step == 3:
             name_val = str(lead.get("Name", "") or "").strip()
             role_val = str(lead.get("Hiring role") or lead.get("Title") or "").strip()
             verified = lead_has_verified_contact(lead)
-            _seed_outreach_widgets_for_lead(lead)
+            lk = outreach_lead_key(lead)
+            # Defer "Reset to templates" until before widgets exist this run.
+            force_reseed = bool(st.session_state.pop(f"hq_out_force_reseed_{lk}", False))
+            if force_reseed:
+                for k in list(st.session_state.keys()):
+                    if str(k).startswith(f"hq_out_{lk}_") or str(k) == f"hq_out_seeded_{lk}":
+                        del st.session_state[k]
+            _seed_outreach_widgets_for_lead(lead, force=force_reseed)
             seq_preview = _sequence_from_widgets(lead)
             touch1_subj = str((seq_preview[0] if seq_preview else {}).get("subject") or "").strip()
             header = name_val if name_val and verified else company_label
@@ -1622,7 +1636,6 @@ elif st.session_state.step == 3:
                     )
                 for em in seq_preview:
                     step = int(em["step"])
-                    lk = outreach_lead_key(lead)
                     st.markdown(f"**Touch {step}**")
                     st.text_input(
                         "Subject",
@@ -1635,10 +1648,10 @@ elif st.session_state.step == 3:
                     )
                 if st.button(
                     "Reset to templates",
-                    key=f"hq_out_reset_{outreach_lead_key(lead)}",
+                    key=f"hq_out_reset_{lk}",
                     width="stretch",
                 ):
-                    _seed_outreach_widgets_for_lead(lead, force=True)
+                    st.session_state[f"hq_out_force_reseed_{lk}"] = True
                     st.rerun()
         if st.button("Classify replies →", type="primary", width="stretch"):
             st.session_state.replies_built = False

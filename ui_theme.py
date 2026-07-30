@@ -136,6 +136,22 @@ def get_global_css() -> str:
     -webkit-text-fill-color: var(--hq-text) !important;
     caret-color: var(--hq-text) !important;
   }
+  /* Outreach bodies: Streamlit textareas often keep a light fill while inheriting
+     near-white --hq-text → unreadable. Force light field + black text always. */
+  [data-baseweb="textarea"] > div,
+  .stTextArea > div > div {
+    background: #eef2f7 !important;
+    border-color: rgba(15, 23, 42, 0.18) !important;
+    border-radius: var(--hq-radius-sm) !important;
+    color-scheme: light;
+  }
+  .stTextArea textarea,
+  [data-baseweb="textarea"] textarea {
+    background: transparent !important;
+    color: #0f172a !important;
+    -webkit-text-fill-color: #0f172a !important;
+    caret-color: #0f172a !important;
+  }
   @media (prefers-color-scheme: light) {
     [data-baseweb="input"] > div, .stTextInput > div > div {
       background: #eef2f7 !important;
