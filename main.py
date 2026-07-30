@@ -58,9 +58,16 @@ from dashboard_metrics import build_dashboard
 from deliverability import InboxStatus, plan_capacity
 from email_engine import (
     OUTREACH_PLACEHOLDERS,
+    ROLE_SEQUENCE_DEFAULT,
+    ROLE_SEQUENCE_KEYS,
+    ROLE_SEQUENCE_LABELS,
     build_email_sequence,
     default_sequence_templates,
+    default_sequences_by_role,
     outreach_lead_key,
+    resolve_templates_for_lead,
+    role_family_for_lead,
+    short_role,
 )
 from role_suggestions import role_based_suggestions
 from enrichment import (
@@ -283,6 +290,8 @@ if "outreach_simulated" not in st.session_state:
     st.session_state.outreach_simulated = False
 if "outreach_templates" not in st.session_state:
     st.session_state.outreach_templates = None
+if "outreach_role_sequences" not in st.session_state:
+    st.session_state.outreach_role_sequences = None
 if "replies_built" not in st.session_state:
     st.session_state.replies_built = False
 if "role_suggestions" not in st.session_state:
@@ -324,11 +333,30 @@ def render_back_button(label: str = "← Back", *, disabled: bool = False, key: 
         st.button(label, on_click=prev_step, **kwargs)
 
 
-def _active_outreach_templates() -> list[dict[str, Any]]:
-    tpls = st.session_state.get("outreach_templates")
-    if isinstance(tpls, list) and tpls:
-        return tpls
-    return default_sequence_templates()
+def _active_role_sequences() -> dict[str, list[dict[str, Any]]]:
+    """Merged role-family sequences (session overrides on top of built-in defaults)."""
+    merged = default_sequences_by_role()
+    stored = st.session_state.get("outreach_role_sequences")
+    if isinstance(stored, dict):
+        for key, tpls in stored.items():
+            if key in merged and isinstance(tpls, list) and tpls:
+                merged[key] = tpls
+    # Legacy single-list templates → treat as Default override.
+    legacy = st.session_state.get("outreach_templates")
+    if isinstance(legacy, list) and legacy and not (
+        isinstance(stored, dict) and stored.get(ROLE_SEQUENCE_DEFAULT)
+    ):
+        merged[ROLE_SEQUENCE_DEFAULT] = legacy
+    return merged
+
+
+def _active_outreach_templates(family: str | None = None) -> list[dict[str, Any]]:
+    key = family if family in ROLE_SEQUENCE_KEYS else ROLE_SEQUENCE_DEFAULT
+    return list(_active_role_sequences().get(key) or default_sequence_templates(key))
+
+
+def _templates_for_lead(lead: pd.Series) -> list[dict[str, Any]]:
+    return resolve_templates_for_lead(lead, _active_role_sequences())
 
 
 def _outreach_widget_prefix(lead_key: str, step: int, field: str) -> str:
@@ -338,7 +366,7 @@ def _outreach_widget_prefix(lead_key: str, step: int, field: str) -> str:
 def _seed_outreach_widgets_for_lead(lead: pd.Series, *, force: bool = False) -> None:
     lk = outreach_lead_key(lead)
     seeded_flag = f"hq_out_seeded_{lk}"
-    seq = build_email_sequence(lead, templates=_active_outreach_templates())
+    seq = build_email_sequence(lead, templates=_templates_for_lead(lead))
     already = bool(st.session_state.get(seeded_flag))
     for em in seq:
         step = int(em["step"])
@@ -361,7 +389,7 @@ def _clear_outreach_lead_widgets() -> None:
 
 def _sequence_from_widgets(lead: pd.Series) -> list[dict[str, str]]:
     lk = outreach_lead_key(lead)
-    base = build_email_sequence(lead, templates=_active_outreach_templates())
+    base = build_email_sequence(lead, templates=_templates_for_lead(lead))
     out: list[dict[str, str]] = []
     for em in base:
         step = int(em["step"])
@@ -379,7 +407,11 @@ def _sequence_from_widgets(lead: pd.Series) -> list[dict[str, str]]:
 
 
 def _clear_outreach_template_widgets() -> None:
-    drop = [k for k in st.session_state if str(k).startswith("hq_tpl_")]
+    drop = [
+        k
+        for k in st.session_state
+        if str(k).startswith("hq_tpl_subj_") or str(k).startswith("hq_tpl_body_")
+    ]
     for k in drop:
         del st.session_state[k]
 
@@ -388,21 +420,42 @@ def _render_outreach_template_editor() -> None:
     # Defer Reset/Apply clears to the next run *before* widgets are created —
     # mutating widget keys after instantiation raises StreamlitAPIException.
     if st.session_state.pop("hq_tpl_do_reset", False):
-        st.session_state.outreach_templates = None
+        fam = str(st.session_state.get("hq_tpl_family") or ROLE_SEQUENCE_DEFAULT)
+        seqs = dict(st.session_state.get("outreach_role_sequences") or {})
+        seqs.pop(fam, None)
+        st.session_state.outreach_role_sequences = seqs or None
+        if fam == ROLE_SEQUENCE_DEFAULT:
+            st.session_state.outreach_templates = None
         _clear_outreach_lead_widgets()
         _clear_outreach_template_widgets()
     if st.session_state.pop("hq_tpl_do_apply", False):
         _clear_outreach_lead_widgets()
 
     ph = ", ".join("{" + p + "}" for p in OUTREACH_PLACEHOLDERS)
-    with st.expander("Sequence templates (placeholders)", expanded=False):
-        st.caption(f"Use placeholders in templates: {ph}. Each lead below is pre-filled from these templates.")
-        tpls = _active_outreach_templates()
+    with st.expander("Sequence templates by role", expanded=False):
+        st.caption(
+            f"Create a sequence per role family. Leads auto-pick the matching sequence; "
+            f"{{role}} is shortened (e.g. AE, not the full job-board title). Placeholders: {ph}."
+        )
+        if "hq_tpl_family" not in st.session_state:
+            st.session_state.hq_tpl_family = ROLE_SEQUENCE_DEFAULT
+        family = st.selectbox(
+            "Sequence for",
+            options=list(ROLE_SEQUENCE_KEYS),
+            format_func=lambda k: ROLE_SEQUENCE_LABELS.get(k, k),
+            key="hq_tpl_family",
+        )
+        # When the family changes, reseed editor widgets from that family's templates.
+        prev = st.session_state.get("hq_tpl_family_loaded")
+        if prev != family:
+            _clear_outreach_template_widgets()
+            st.session_state.hq_tpl_family_loaded = family
+        tpls = _active_outreach_templates(family)
         edited: list[dict[str, Any]] = []
         for i, tpl in enumerate(tpls):
             step = int(tpl["step"])
-            sk = f"hq_tpl_subj_{i}"
-            bk = f"hq_tpl_body_{i}"
+            sk = f"hq_tpl_subj_{family}_{i}"
+            bk = f"hq_tpl_body_{family}_{i}"
             if sk not in st.session_state:
                 st.session_state[sk] = str(tpl.get("subject") or "")
             if bk not in st.session_state:
@@ -415,20 +468,31 @@ def _render_outreach_template_editor() -> None:
             )
         c1, c2, c3 = st.columns(3)
         with c1:
-            if st.button("Save templates", width="stretch", key="hq_tpl_save"):
-                st.session_state.outreach_templates = edited
-                safe_toast("Templates saved.", icon="💾")
+            if st.button("Save sequence", width="stretch", key="hq_tpl_save"):
+                seqs = dict(st.session_state.get("outreach_role_sequences") or {})
+                seqs[family] = edited
+                st.session_state.outreach_role_sequences = seqs
+                if family == ROLE_SEQUENCE_DEFAULT:
+                    st.session_state.outreach_templates = edited
+                safe_toast(f"Saved sequence for {ROLE_SEQUENCE_LABELS.get(family, family)}.", icon="💾")
         with c2:
-            if st.button("Apply to all leads", width="stretch", key="hq_tpl_apply"):
-                st.session_state.outreach_templates = edited
+            if st.button("Apply to matching leads", width="stretch", key="hq_tpl_apply"):
+                seqs = dict(st.session_state.get("outreach_role_sequences") or {})
+                seqs[family] = edited
+                st.session_state.outreach_role_sequences = seqs
+                if family == ROLE_SEQUENCE_DEFAULT:
+                    st.session_state.outreach_templates = edited
                 st.session_state.hq_tpl_do_apply = True
-                safe_toast("Templates applied — lead drafts refreshed.", icon="↻")
+                safe_toast("Sequence applied — matching lead drafts refreshed.", icon="↻")
                 st.rerun()
         with c3:
-            if st.button("Reset defaults", width="stretch", key="hq_tpl_reset"):
+            if st.button("Reset this sequence", width="stretch", key="hq_tpl_reset"):
                 st.session_state.hq_tpl_do_reset = True
                 st.rerun()
-
+        st.caption(
+            "Tip: edit AE / SDR / sales-leader sequences once — every matching lead picks them up. "
+            "Save pipeline to NocoDB to keep them across sessions."
+        )
 
 def _outreach_lead_strip_unverified_linkedin(lead: pd.Series) -> pd.Series:
     """Drop LinkedIn **person** URLs until verified; keep board job/company links."""
@@ -525,6 +589,7 @@ def _payload_for_save() -> dict:
         "outreach_tiers": list(st.session_state.get("outreach_tiers") or ["High", "Medium"]),
         "assigned_sdr_label": str(st.session_state.get("assigned_sdr_label") or "SDR Team").strip(),
         "outreach_templates": list(st.session_state.outreach_templates or []),
+        "outreach_role_sequences": dict(st.session_state.outreach_role_sequences or {}),
     }
 
 
@@ -602,6 +667,15 @@ def _hydrate_from_payload(payload: dict) -> None:
     if isinstance(otpl, list) and otpl:
         st.session_state.outreach_templates = otpl
         _clear_outreach_lead_widgets()
+    ors = payload.get("outreach_role_sequences")
+    if isinstance(ors, dict) and ors:
+        cleaned: dict[str, list[dict[str, Any]]] = {}
+        for key, tpls in ors.items():
+            if key in ROLE_SEQUENCE_KEYS and isinstance(tpls, list) and tpls:
+                cleaned[str(key)] = tpls
+        if cleaned:
+            st.session_state.outreach_role_sequences = cleaned
+            _clear_outreach_lead_widgets()
 
 def _viewer_geo_maybe_refresh() -> None:
     """Throttle IP geolocation lookups (ip-api.com) to once per hour per session."""
@@ -1481,9 +1555,9 @@ elif st.session_state.step == 3:
     st.markdown(
         section_header(
             "Outreach",
-            "Edit each touch below before dispatch. Templates use "
+            "Edit each touch before dispatch, or set sequences by role above. "
             + ", ".join("{" + p + "}" for p in OUTREACH_PLACEHOLDERS)
-            + " filled from enrichment. Verified contacts only are sent on dispatch.",
+            + " fill from enrichment ({role} is shortened). Verified contacts only are sent.",
         ),
         unsafe_allow_html=True,
     )
@@ -1512,8 +1586,9 @@ elif st.session_state.step == 3:
                 f"Dispatch only sends the **{verified_total}** verified lead(s)."
             )
         st.caption(
-            f"Each lead below is **pre-filled** from sequence templates (company / role / greeting). "
-            f"Edit before dispatch. Verified = Apollo contact · Preview only = job signal without a sendable email."
+            f"Each lead below is **pre-filled** from the matching role sequence "
+            f"(AE / SDR·BDR / sales leader / default). {{role}} uses a short label, not the full posting title. "
+            f"Verified = Apollo contact · Preview only = job signal without a sendable email."
         )
         st.caption(
             f"Dispatch enrolls **{verified_total}** verified lead(s) into SmartLead when configured."
@@ -1609,6 +1684,8 @@ elif st.session_state.step == 3:
             company_label = str(lead.get("Company", "") or "")
             name_val = str(lead.get("Name", "") or "").strip()
             role_val = str(lead.get("Hiring role") or lead.get("Title") or "").strip()
+            role_short = short_role(role_val) if role_val else ""
+            family_label = ROLE_SEQUENCE_LABELS.get(role_family_for_lead(lead), "Default")
             verified = lead_has_verified_contact(lead)
             lk = outreach_lead_key(lead)
             # Defer "Reset to templates" until before widgets exist this run.
@@ -1622,13 +1699,17 @@ elif st.session_state.step == 3:
             touch1_subj = str((seq_preview[0] if seq_preview else {}).get("subject") or "").strip()
             header = name_val if name_val and verified else company_label
             status = "Verified" if verified else "Preview only"
+            role_bit = role_short or role_val or "role TBD"
             subj_bit = f" · {touch1_subj[:48]}{'…' if len(touch1_subj) > 48 else ''}" if touch1_subj else " · (draft empty — click Reset)"
             # Keep verified open; also open first few so drafts are obvious on first visit.
             open_preview = (not verified) and row_i < 3
             with st.expander(
-                f"{header} · {role_val or 'role TBD'} · {status}{subj_bit}",
+                f"{header} · {role_bit} · {status}{subj_bit}",
                 expanded=verified or open_preview,
             ):
+                st.caption(f"Sequence: {family_label}")
+                if role_val and role_short and role_val.strip().lower() != role_short.lower():
+                    st.caption(f"Full posting (shortened in email): {role_val}")
                 if not verified:
                     st.info(
                         "Preview only — no verified Apollo email yet. Draft below is still pre-filled "
